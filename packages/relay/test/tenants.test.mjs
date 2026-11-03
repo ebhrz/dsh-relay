@@ -100,6 +100,23 @@ try {
   // ── unknown keys must not resolve ───────────────────────────────────
   assert.equal(reloaded.byKeyId(keyIdFor('not-a-tenant')), null)
 
+  // ── a running server picks up CLI edits ─────────────────────────────
+  // The CLI writes the same file the server holds in memory, so a reload must
+  // merge rather than replace (live connections keep their tenant object).
+  const live = new TenantStore(file)
+  const liveTenant = live.get('alice')
+  live.charge(liveTenant, 500)
+  const cli = new TenantStore(file)
+  assert.equal(live.reloadIfChanged(), false, 'nothing changed yet')
+  cli.setStatus('alice', 'disabled')
+  assert.equal(live.reloadIfChanged(), true, 'the edit is noticed')
+  assert.equal(live.get('alice'), liveTenant, 'the live object is kept')
+  assert.equal(liveTenant.status, 'disabled')
+  assert.equal(liveTenant.usedBytesDay, 500, 'bytes charged in memory survive the merge')
+
+  fs.rmSync(file)
+  assert.equal(live.reloadIfChanged(), false, 'a missing file is not an error')
+
   console.log('ok: tenant registry')
 } finally {
   cleanup()

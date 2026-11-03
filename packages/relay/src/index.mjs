@@ -29,7 +29,9 @@ import {
   parseQuota,
 } from './tenants.js'
 
-const VERSION = '0.1.0'
+// Read from the manifest so a release bump cannot leave --version or the boot
+// log claiming an older build.
+const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
 
 function parseArgs(argv) {
   const args = {
@@ -674,6 +676,12 @@ function runTenantCli(argv) {
       printList()
       return
     }
+    case '--help':
+    case '-h':
+    case 'help': {
+      console.log(usage())
+      return
+    }
     case 'add': {
       const name = flags.name ?? positional[0]
       if (!name) fail('tenant add needs --name <name>')
@@ -746,7 +754,11 @@ if (!tenantCount && !args.key) {
   log('warning: no tenants and no --key — nobody can register. Try: dsh-relay-server tenant add --name <name>')
 }
 
-const saveTimer = setInterval(() => tenantStore.saveIfDirty(), 15000)
+const saveTimer = setInterval(() => {
+  tenantStore.saveIfDirty()
+  // Picks up `tenant add/disable/reset` run while the server keeps running.
+  tenantStore.reloadIfChanged()
+}, 15000)
 saveTimer.unref?.()
 
 const shutdown = () => {

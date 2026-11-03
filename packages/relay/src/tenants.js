@@ -61,6 +61,7 @@ export class TenantStore {
     this.quotaDefault = quotaDefault
     this.tenants = new Map() // name -> tenant
     this.dirty = false
+    this.mtimeMs = 0
     this.load()
   }
 
@@ -70,9 +71,61 @@ export class TenantStore {
       for (const tenant of raw.tenants ?? []) {
         this.tenants.set(tenant.id, normalize(tenant, this.quotaDefault))
       }
+      this.mtimeMs = this.statMtime()
     } catch (error) {
       if (error.code !== 'ENOENT') console.error(`tenant store: ${error.message}`)
     }
+  }
+
+  statMtime() {
+    try {
+      return fs.statSync(this.file).mtimeMs
+    } catch {
+      return 0
+    }
+  }
+
+  /**
+   * Pick up `tenant add`/`disable`/`reset` made by the CLI while the server is
+   * running. Objects are merged in place because live connections hold a
+   * reference to their tenant; replacing the map would orphan them.
+   */
+  reloadIfChanged() {
+    const mtimeMs = this.statMtime()
+    if (!mtimeMs || mtimeMs === this.mtimeMs) return false
+    this.mtimeMs = mtimeMs
+    let raw
+    try {
+      raw = JSON.parse(fs.readFileSync(this.file, 'utf8'))
+    } catch {
+      return false
+    }
+    const seen = new Set()
+    for (const record of raw.tenants ?? []) {
+      const next = normalize(record, this.quotaDefault)
+      const live = this.tenants.get(next.id)
+      if (live) {
+        live.quotaBytesDay = next.quotaBytesDay
+        live.status = next.status
+        live.note = next.note
+        live.keyId = next.keyId
+        live.secret = next.secret
+        if (next.day > live.day) {
+          live.day = next.day
+          live.usedBytesDay = next.usedBytesDay
+        } else if (next.day === live.day) {
+          // Never lose bytes this process already charged.
+          live.usedBytesDay = Math.max(live.usedBytesDay, next.usedBytesDay)
+        }
+      } else {
+        this.tenants.set(next.id, next)
+      }
+      seen.add(next.id)
+    }
+    for (const id of [...this.tenants.keys()]) {
+      if (!seen.has(id)) this.tenants.delete(id)
+    }
+    return true
   }
 
   /** Atomic write; a crash mid-save must not lose the quota ledger. */
@@ -86,6 +139,7 @@ export class TenantStore {
     fs.writeFileSync(tmp, `${JSON.stringify(payload, null, 2)}\n`)
     fs.renameSync(tmp, this.file)
     this.dirty = false
+    this.mtimeMs = this.statMtime()
   }
 
   saveIfDirty() {
