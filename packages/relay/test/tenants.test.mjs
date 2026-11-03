@@ -8,6 +8,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import {
+  DEFAULT_MAX_STREAMS,
   DEFAULT_QUOTA_BYTES,
   TenantStore,
   formatBytes,
@@ -96,6 +97,25 @@ try {
   // ── defaults ────────────────────────────────────────────────────────
   const defaults = new TenantStore(path.join(dir, 'default.json'))
   assert.equal(defaults.add({ name: 'bob' }).tenant.quotaBytesDay, DEFAULT_QUOTA_BYTES)
+  assert.equal(defaults.get('bob').maxStreams, DEFAULT_MAX_STREAMS, 'a new tenant gets the stream cap')
+
+  // ── configurable limits ─────────────────────────────────────────────
+  // 0 means unlimited on both axes, which is how the owner runs their own key.
+  const own = defaults.add({ name: 'owner', quotaBytesDay: 0, maxStreams: 0 }).tenant
+  assert.equal(own.maxStreams, 0)
+  assert.equal(own.quotaBytesDay, 0)
+  assert.equal(defaults.blocked(own), null, 'unlimited tenants are never blocked by quota')
+  defaults.charge(own, 10 * 1024 * 1024 * 1024)
+  assert.equal(defaults.blocked(own), null, 'an unlimited tenant stays usable')
+  defaults.setLimits('owner', { maxStreams: 5 })
+  assert.equal(defaults.get('owner').maxStreams, 5)
+  assert.equal(defaults.get('owner').quotaBytesDay, 0, 'setLimits leaves the untouched field alone')
+
+  // ── the stream cap survives a reload and a CLI edit ─────────────────
+  const capped = new TenantStore(path.join(dir, 'default.json'))
+  assert.equal(capped.get('owner').maxStreams, 5)
+  capped.setLimits('owner', { maxStreams: 9 })
+  assert.equal(capped.reloadIfChanged(), false, 'our own write is not a foreign change')
 
   // ── unknown keys must not resolve ───────────────────────────────────
   assert.equal(reloaded.byKeyId(keyIdFor('not-a-tenant')), null)

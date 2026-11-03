@@ -63,6 +63,7 @@ The panel at `/relay-bridge/panel` shows the current status and the last transit
 | New session shows an empty "choose a model" | The model catalog could not be read, so the deployment default is unknown | Check that `model.catalog` answers; the chip falls back to the last model this phone picked, then to the host default |
 | Relay says the key is unknown or disabled | The key matches no tenant on that relay, or the tenant was disabled | `dsh-relay-server tenant list` shows each key id; the panel prints the relay reason verbatim |
 | Relay says today's traffic is used up | The tenant hit its daily quota (default 100 MB, UTC day). The relay cuts the connection and refuses re-registration until tomorrow | `dsh-relay-server tenant reset <name>` gives the day back; `tenant add --quota` changes the limit |
+| Phone requests fail with `429 Too Many Requests` | The tenant hit its concurrent stream cap (`--max-streams-default`, default 32, `0` = unlimited): every open phone socket counts | Close extra tabs, or raise it with `tenant set <name> --max-streams 64` |
 | Two machines share one tenant key | The relay allows one agent per tenant: the newest registration replaces and drops the older connection | Give each machine its own `tenant add` |
 
 | A new session ignores the model you picked last | The host persists the pick through `agentDefaultModel.saveSelection`, which needs a writable profile config | Check the desktop picker applies it as well; the phone also caches the pick in `localStorage` (`dshRelayLastModel`) |

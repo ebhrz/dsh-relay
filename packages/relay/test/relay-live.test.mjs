@@ -45,7 +45,7 @@ const waitFor = async (predicate, label, timeoutMs = 15000) => {
 }
 
 const store = new TenantStore(path.join(dir, 'tenants.json'), { quotaDefault: QUOTA })
-const created = store.add({ name: 'tester', quotaBytesDay: QUOTA })
+const created = store.add({ name: 'tester', quotaBytesDay: QUOTA, maxStreams: 2 })
 const key = created.key
 store.save()
 
@@ -110,6 +110,49 @@ try {
   const tenant = ledger.tenants.find((item) => item.id === 'tester')
   assert.ok(tenant.usedBytesDay > 0, `bytes must be metered, got ${tenant.usedBytesDay}`)
   assert.ok(tenant.usedBytesDay < QUOTA, 'a small exchange stays under the quota')
+
+  // ── concurrency cap: maxStreams is 2 for this tenant ────────────────
+  const wsCap = new WebSocket(`wss://127.0.0.1:${agentPort}/agent`, { rejectUnauthorized: false })
+  const capMessages = []
+  const capFrames = []
+  wsCap.on('message', (data, isBinary) => {
+    if (isBinary) capFrames.push(data)
+    else capMessages.push(JSON.parse(data.toString()))
+  })
+  await new Promise((resolve, reject) => {
+    wsCap.once('open', resolve)
+    wsCap.once('error', reject)
+  })
+  wsCap.send(JSON.stringify({ t: 'hello', v: 1, id: AGENT_ID, gate: GATE, keyId: keyIdFor(key) }))
+  const capChallenge = await waitFor(async () => capMessages.find((m) => m.t === 'challenge'), 'challenge for the cap test')
+  const capProof = crypto.createHmac('sha256', secretFor(key)).update(`${capChallenge.nonce}|${AGENT_ID}`).digest('hex')
+  wsCap.send(JSON.stringify({ t: 'register', proof: capProof }))
+  await waitFor(async () => capMessages.some((m) => m.t === 'registered' || m.t === 'rejected'), 'registered for the cap test')
+
+  const held = []
+  for (let i = 0; i < 2; i += 1) {
+    const heldSocket = net.connect({ host: '127.0.0.1', port: phonePort })
+    heldSocket.on('error', () => {})
+    await new Promise((resolve) => heldSocket.once('connect', resolve))
+    heldSocket.write(`GET /c/${AGENT_ID}/hold${i}?g=${GATE} HTTP/1.1\r\nhost: x\r\n\r\n`)
+    held.push(heldSocket)
+  }
+  await waitFor(async () => capFrames.length >= 2, 'both streams reached the agent')
+
+  const overflow = net.connect({ host: '127.0.0.1', port: phonePort })
+  overflow.on('error', () => {})
+  const overflowText = await new Promise((resolve) => {
+    let text = ''
+    overflow.on('data', (chunk) => { text += chunk.toString('latin1') })
+    overflow.on('close', () => resolve(text))
+    overflow.once('connect', () => overflow.write(`GET /c/${AGENT_ID}/over?g=${GATE} HTTP/1.1\r\nhost: x\r\n\r\n`))
+    setTimeout(() => resolve(text), 5000)
+  })
+  assert.match(overflowText, /429 Too Many Requests/, `the third stream must be refused, got: ${overflowText.slice(0, 80)}`)
+  overflow.destroy()
+  for (const heldSocket of held) heldSocket.destroy()
+  wsCap.close()
+  await new Promise((done) => setTimeout(done, 300))
 
   // ── quota cutoff: refill the ledger, then push past the limit ───────
   const reloaded = new TenantStore(path.join(dir, 'tenants.json'))

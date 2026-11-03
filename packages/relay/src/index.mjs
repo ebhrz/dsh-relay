@@ -23,6 +23,7 @@ import os from 'node:os'
 import { execFileSync } from 'node:child_process'
 import { WebSocketServer } from 'ws'
 import {
+  DEFAULT_MAX_STREAMS,
   DEFAULT_QUOTA_BYTES,
   TenantStore,
   formatBytes,
@@ -41,6 +42,7 @@ function parseArgs(argv) {
     agentPort: null, // default: port + 1
     key: process.env.DSH_RELAY_KEY ?? null,
     quotaDefault: DEFAULT_QUOTA_BYTES,
+    maxStreamsDefault: DEFAULT_MAX_STREAMS,
     dataDir: path.join(os.homedir(), '.dsh-relay'),
     tlsCert: null,
     tlsKey: null,
@@ -62,6 +64,12 @@ function parseArgs(argv) {
         const parsed = parseQuota(next())
         if (!parsed) fail('bad --quota-default (use e.g. 100MB)')
         args.quotaDefault = parsed
+        break
+      }
+      case '--max-streams-default': {
+        const parsed = Number(next())
+        if (!Number.isInteger(parsed) || parsed < 0) fail('bad --max-streams-default (0 = unlimited)')
+        args.maxStreamsDefault = parsed
         break
       }
       case '--data-dir': args.dataDir = next(); break
@@ -90,6 +98,7 @@ function usage() {
   --host <addr>       bind address (default 0.0.0.0)
   --key <secret>      admin registration key (optional; tenants are the normal path)
   --quota-default <n> daily quota for new tenants (default 100MB)
+  --max-streams-default <n> concurrent streams per tenant (default 32; 0 = unlimited)
   --tls-cert <pem>    custom TLS cert for the agent listener (default: auto
                       self-signed into --data-dir)
   --tls-key <pem>     custom TLS key for the agent listener
@@ -379,6 +388,15 @@ function handlePhoneSocket(args, socket) {
         log(`403 id=${id} gateLen=${gate.length} cookieGate=${(gateCookie || '').slice(0, 8)} entryGate=${entry.gate.slice(0, 8)} match=${gate === entry.gate}`)
         return tinyResponse(socket, 403, 'Forbidden', 'dsh-relay: bad gate.\n')
       }
+      // Concurrency cap: one stream is one phone socket held open on this box.
+      // The admin key (no tenant) is never capped; a tenant with maxStreams 0 is
+      // unlimited too.
+      const maxStreams = entry.tenant?.maxStreams ?? 0
+      if (maxStreams > 0 && entry.streams.size >= maxStreams) {
+        log(`429-streams id=${id} tenant=${entry.tenant.id} active=${entry.streams.size} limit=${maxStreams}`)
+        return tinyResponse(socket, 429, 'Too Many Requests',
+          `dsh-relay: this key allows ${maxStreams} concurrent streams (${entry.streams.size} in use). Close another tab or retry in a moment.\n`)
+      }
       const sid = allocSid()
       entry.streams.add(sid)
       const firstBytes = fullHead ?? Buffer.from(`${line}\r\n`, 'latin1')
@@ -617,6 +635,7 @@ function startAgentListener(args, tls) {
 function runTenantCli(argv) {
   let dataDir = path.join(os.homedir(), '.dsh-relay')
   let quotaDefault = DEFAULT_QUOTA_BYTES
+  let maxStreamsDefault = DEFAULT_MAX_STREAMS
   const rest = []
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i]
@@ -629,6 +648,12 @@ function runTenantCli(argv) {
       const parsed = parseQuota(argv[i + 1])
       if (!parsed) fail('bad --quota-default (use e.g. 100MB)')
       quotaDefault = parsed
+      i += 1
+    } else if (a === '--max-streams-default') {
+      if (i + 1 >= argv.length) fail('missing value for --max-streams-default')
+      const parsed = Number(argv[i + 1])
+      if (!Number.isInteger(parsed) || parsed < 0) fail('bad --max-streams-default (0 = unlimited)')
+      maxStreamsDefault = parsed
       i += 1
     } else {
       rest.push(a)
@@ -648,7 +673,7 @@ function runTenantCli(argv) {
     }
   }
 
-  const store = new TenantStore(path.join(dataDir, 'tenants.json'), { quotaDefault })
+  const store = new TenantStore(path.join(dataDir, 'tenants.json'), { quotaDefault, maxStreamsDefault })
 
   const printList = () => {
     const rows = store.list()
@@ -656,7 +681,7 @@ function runTenantCli(argv) {
       console.log('no tenants. Create one with: dsh-relay-server tenant add --name <name>')
       return
     }
-    console.log(['name', 'status', 'today', 'quota', 'last seen', 'key id'].join('\t'))
+    console.log(['name', 'status', 'today', 'quota', 'streams', 'last seen', 'key id'].join('\t'))
     for (const tenant of rows) {
       const used = tenant.day === quotaDayNow() ? tenant.usedBytesDay : 0
       console.log([
@@ -664,6 +689,7 @@ function runTenantCli(argv) {
         tenant.status,
         `${formatBytes(used)}${tenant.day === quotaDayNow() ? '' : ' (new day)'}`,
         tenant.quotaBytesDay > 0 ? formatBytes(tenant.quotaBytesDay) : 'unlimited',
+        tenant.maxStreams > 0 ? String(tenant.maxStreams) : 'unlimited',
         tenant.lastSeenAt ?? 'never',
         tenant.keyId,
       ].join('\t'))
@@ -685,20 +711,29 @@ function runTenantCli(argv) {
     case 'add': {
       const name = flags.name ?? positional[0]
       if (!name) fail('tenant add needs --name <name>')
-      let quota = quotaDefault
-      if (flags.quota !== undefined) {
-        const parsed = parseQuota(flags.quota)
-        if (!parsed) fail('bad --quota (use e.g. 100MB)')
-        quota = parsed
-      }
-      const { tenant, key } = store.add({ name, quotaBytesDay: quota, note: flags.note ?? '' })
+      const quota = parseLimitFlag(flags.quota, quotaDefault, 'quota')
+      const maxStreams = parseStreamsFlag(flags['max-streams'], maxStreamsDefault)
+      const { tenant, key } = store.add({ name, quotaBytesDay: quota, maxStreams, note: flags.note ?? '' })
       console.log(`tenant ${tenant.id} created`)
-      console.log(`  quota:  ${tenant.quotaBytesDay > 0 ? formatBytes(tenant.quotaBytesDay) : 'unlimited'} per day`)
-      console.log(`  key id: ${tenant.keyId}`)
+      console.log(`  quota:   ${tenant.quotaBytesDay > 0 ? formatBytes(tenant.quotaBytesDay) : 'unlimited'} per day`)
+      console.log(`  streams: ${tenant.maxStreams > 0 ? tenant.maxStreams + ' concurrent' : 'unlimited'}`)
+      console.log(`  key id:  ${tenant.keyId}`)
       console.log('')
       console.log('  relay key (shown once, store it in the DSH panel):')
       console.log(`  ${key}`)
       console.log('')
+      return
+    }
+    case 'set': {
+      const ref = flags.name ?? positional[0]
+      if (!ref) fail('tenant set needs a name')
+      const patch = {}
+      if (flags.quota !== undefined) patch.quotaBytesDay = parseLimitFlag(flags.quota, quotaDefault, 'quota')
+      if (flags['max-streams'] !== undefined) patch.maxStreams = parseStreamsFlag(flags['max-streams'], maxStreamsDefault)
+      if (!Object.keys(patch).length) fail('tenant set needs --quota and/or --max-streams')
+      const tenant = store.setLimits(ref, patch)
+      console.log(`tenant ${tenant.id}: quota ${tenant.quotaBytesDay > 0 ? formatBytes(tenant.quotaBytesDay) + '/day' : 'unlimited'}, streams ${tenant.maxStreams > 0 ? tenant.maxStreams : 'unlimited'}`)
+      console.log('applies to new connections immediately (the running server reloads within 15s)')
       return
     }
     case 'show': {
@@ -734,17 +769,42 @@ function quotaDayNow() {
   return new Date().toISOString().slice(0, 10)
 }
 
+/** `--quota 100MB` / `--quota unlimited` -> bytes (0 means unlimited). */
+function parseLimitFlag(raw, fallback, label) {
+  if (raw === undefined) return fallback
+  if (raw === 'unlimited' || raw === '0') return 0
+  const parsed = parseQuota(raw)
+  if (parsed === null) fail(`bad --${label} (use e.g. 100MB, or unlimited)`)
+  return parsed
+}
+
+/** `--max-streams 8` / `--max-streams 0` (0 means unlimited). */
+function parseStreamsFlag(raw, fallback) {
+  if (raw === undefined) return fallback
+  const parsed = Number(raw)
+  if (!Number.isInteger(parsed) || parsed < 0) fail('bad --max-streams (integer >= 0; 0 = unlimited)')
+  return parsed
+}
+
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 
 if (process.argv[2] === 'tenant') {
-  runTenantCli(process.argv.slice(3))
+  try {
+    runTenantCli(process.argv.slice(3))
+  } catch (error) {
+    // Operator mistakes are not crashes: print the reason, no stack trace.
+    fail(error?.message ?? String(error))
+  }
   process.exit(0)
 }
 
 const args = parseArgs(process.argv)
-tenantStore = new TenantStore(path.join(args.dataDir, 'tenants.json'), { quotaDefault: args.quotaDefault })
+tenantStore = new TenantStore(path.join(args.dataDir, 'tenants.json'), {
+  quotaDefault: args.quotaDefault,
+  maxStreamsDefault: args.maxStreamsDefault,
+})
 const tls = ensureSelfSignedCert(args)
 startPhoneListener(args)
 startAgentListener(args, tls)

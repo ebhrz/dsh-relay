@@ -12,6 +12,10 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 export const DEFAULT_QUOTA_BYTES = 100 * 1024 * 1024
+// A phone page holds a handful of connections at once (assets, API calls, the
+// mux WebSocket) and a browser may open six per origin; 32 leaves room for a
+// second tab without letting one tenant fill the process with sockets.
+export const DEFAULT_MAX_STREAMS = 32
 
 /** Public identifier of a key: what the agent sends in `hello`. */
 export function keyIdFor(key) {
@@ -56,9 +60,10 @@ export function formatBytes(bytes) {
 }
 
 export class TenantStore {
-  constructor(file, { quotaDefault = DEFAULT_QUOTA_BYTES } = {}) {
+  constructor(file, { quotaDefault = DEFAULT_QUOTA_BYTES, maxStreamsDefault = DEFAULT_MAX_STREAMS } = {}) {
     this.file = file
     this.quotaDefault = quotaDefault
+    this.maxStreamsDefault = maxStreamsDefault
     this.tenants = new Map() // name -> tenant
     this.dirty = false
     this.mtimeMs = 0
@@ -69,7 +74,7 @@ export class TenantStore {
     try {
       const raw = JSON.parse(fs.readFileSync(this.file, 'utf8'))
       for (const tenant of raw.tenants ?? []) {
-        this.tenants.set(tenant.id, normalize(tenant, this.quotaDefault))
+        this.tenants.set(tenant.id, normalize(tenant, this.quotaDefault, this.maxStreamsDefault))
       }
       this.mtimeMs = this.statMtime()
     } catch (error) {
@@ -102,10 +107,11 @@ export class TenantStore {
     }
     const seen = new Set()
     for (const record of raw.tenants ?? []) {
-      const next = normalize(record, this.quotaDefault)
+      const next = normalize(record, this.quotaDefault, this.maxStreamsDefault)
       const live = this.tenants.get(next.id)
       if (live) {
         live.quotaBytesDay = next.quotaBytesDay
+        live.maxStreams = next.maxStreams
         live.status = next.status
         live.note = next.note
         live.keyId = next.keyId
@@ -152,7 +158,7 @@ export class TenantStore {
   }
 
   /** Creates a tenant and returns the only copy of its key. */
-  add({ name, quotaBytesDay = this.quotaDefault, note = '' }) {
+  add({ name, quotaBytesDay = this.quotaDefault, maxStreams = this.maxStreamsDefault, note = '' }) {
     const id = String(name ?? '').trim()
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]{1,31}$/.test(id)) {
       throw new Error('name must be 2-32 chars: letters, digits, dot, dash, underscore')
@@ -164,6 +170,7 @@ export class TenantStore {
       keyId: keyIdFor(key),
       secret: secretFor(key),
       quotaBytesDay,
+      maxStreams,
       usedBytesDay: 0,
       day: quotaDay(),
       status: 'active',
@@ -175,6 +182,17 @@ export class TenantStore {
     this.dirty = true
     this.save()
     return { tenant, key }
+  }
+
+  /** Changes the limits of an existing tenant without touching its key. */
+  setLimits(ref, { quotaBytesDay, maxStreams }) {
+    const tenant = this.resolve(ref)
+    if (!tenant) throw new Error(`no tenant ${ref}`)
+    if (Number.isFinite(quotaBytesDay)) tenant.quotaBytesDay = quotaBytesDay
+    if (Number.isFinite(maxStreams)) tenant.maxStreams = maxStreams
+    this.dirty = true
+    this.save()
+    return tenant
   }
 
   byKeyId(keyId) {
@@ -253,13 +271,14 @@ export class TenantStore {
   }
 }
 
-function normalize(tenant, quotaDefault) {
+function normalize(tenant, quotaDefault, maxStreamsDefault = DEFAULT_MAX_STREAMS) {
   const secret = tenant.secret ?? hashKey(tenant.key ?? '')
   return {
     id: tenant.id,
     keyId: tenant.keyId ?? secret.slice(0, 12),
     secret,
     quotaBytesDay: Number.isFinite(tenant.quotaBytesDay) ? tenant.quotaBytesDay : quotaDefault,
+    maxStreams: Number.isFinite(tenant.maxStreams) ? tenant.maxStreams : maxStreamsDefault,
     usedBytesDay: Number.isFinite(tenant.usedBytesDay) ? tenant.usedBytesDay : 0,
     day: tenant.day ?? quotaDay(),
     status: tenant.status === 'disabled' ? 'disabled' : 'active',
