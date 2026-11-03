@@ -6,24 +6,12 @@
 // reload into the real DSH app. tweetnacl is inlined from the plugin's own
 // node_modules so both ends share one sha512 implementation.
 
-import fs from 'node:fs'
-import { fileURLToPath } from 'node:url'
+import { naclBundleSource } from './nacl-bundle.js'
 
 let naclJsCache = null
 
 function naclJs() {
-  if (naclJsCache !== null) return naclJsCache
-  const candidates = [
-    new URL('../node_modules/tweetnacl/nacl-fast.min.js', import.meta.url),
-    new URL('../node_modules/tweetnacl/nacl.min.js', import.meta.url),
-  ]
-  for (const url of candidates) {
-    try {
-      naclJsCache = fs.readFileSync(fileURLToPath(url), 'utf8')
-      return naclJsCache
-    } catch {}
-  }
-  naclJsCache = ''
+  if (naclJsCache === null) naclJsCache = naclBundleSource()
   return naclJsCache
 }
 

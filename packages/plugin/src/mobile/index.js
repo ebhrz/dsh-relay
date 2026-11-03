@@ -22,6 +22,7 @@ import path from 'node:path'
 import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { buildFrame, parseFrame, isDataFrame, OPCODES } from '../ws-codec.js'
+import { naclBundlePath } from '../nacl-bundle.js'
 
 const ASSET_DIR = fileURLToPath(new URL('./assets/', import.meta.url))
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
@@ -348,20 +349,6 @@ function escapeHtml(text) {
 }
 
 /** tweetnacl on disk, shared verbatim with the pairing page and boot injection. */
-let naclFile
 function naclPath() {
-  if (naclFile !== undefined) return naclFile
-  const candidates = [
-    new URL('../../node_modules/tweetnacl/nacl-fast.min.js', import.meta.url),
-    new URL('../../node_modules/tweetnacl/nacl.min.js', import.meta.url),
-  ]
-  for (const url of candidates) {
-    try {
-      fs.accessSync(fileURLToPath(url))
-      naclFile = fileURLToPath(url)
-      return naclFile
-    } catch {}
-  }
-  naclFile = null
-  return null
+  return naclBundlePath()
 }
