@@ -1,0 +1,7 @@
+dsh-relay
+Copyright 2026 ebhrz
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Third-party dependencies remain under their own licenses; the resolved set and
+versions are recorded in the lockfile and in each package's package.json.

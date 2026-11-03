@@ -1,0 +1,30 @@
+{
+  "name": "dsh-relay",
+  "version": "0.10.3",
+  "private": true,
+  "description": "Phone-first remote control for a local DeepSeek Harness, routed through your own zero-knowledge relay.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "npm run test --workspace dsh-relay-bridge",
+    "test:ui": "npm run test:ui --workspace dsh-relay-bridge",
+    "check": "npm run check --workspaces --if-present",
+    "dev:mock": "npm run dev:mock --workspace dsh-relay-bridge",
+    "start:relay": "npm start --workspace dsh-relay-server"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ebhrz/dsh-relay.git"
+  },
+  "homepage": "https://github.com/ebhrz/dsh-relay#readme",
+  "bugs": {
+    "url": "https://github.com/ebhrz/dsh-relay/issues"
+  },
+  "author": "ebhrz <ebhrz1@163.com>"
+}

@@ -1,0 +1,23 @@
+# dsh-relay-bridge bundle patch — installed by the DSH plugin loader.
+#
+#   dsh plugin --profile web add link:./packages/plugin
+#
+# These are only *defaults*. Anything the local panel saves wins over this file:
+# the panel writes ~/.dsh/plugin-data/dsh-relay-bridge/config.json, and
+# RelayBridgeService merges that over the values below on every start.
+#
+# Never put a live relay key here. Configure the relay once in the panel
+# (http://127.0.0.1:<dsh-port>/relay-bridge/panel); the key is stored in the
+# plugin-data config, not in the repository.
+#
+# With relayHost/relayKey empty the plugin stays idle until configured.
+- insert:
+    - id: relay-bridge
+      name: 'dsh-relay-bridge'
+      config:
+        relayScheme: 'https'
+        relayHost: ''
+        relayPort: 8889
+        agentPort: 9000
+        relayKey: ''
+        autoStart: true

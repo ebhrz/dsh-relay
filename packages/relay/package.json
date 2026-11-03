@@ -1,0 +1,42 @@
+{
+  "name": "dsh-relay-server",
+  "version": "0.1.0",
+  "description": "Zero-knowledge relay for dsh-relay-bridge: no accounts, no database, routes end-to-end encrypted streams by device id.",
+  "type": "module",
+  "bin": {
+    "dsh-relay-server": "src/index.mjs"
+  },
+  "main": "src/index.mjs",
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "start": "node src/index.mjs",
+    "start:tls": "node src/tls-terminator.mjs",
+    "check": "node --check src/index.mjs && node --check src/tls-terminator.mjs"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "relay",
+    "reverse-proxy",
+    "zero-knowledge",
+    "websocket"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ebhrz/dsh-relay.git",
+    "directory": "packages/relay"
+  },
+  "homepage": "https://github.com/ebhrz/dsh-relay#readme",
+  "bugs": {
+    "url": "https://github.com/ebhrz/dsh-relay/issues"
+  }
+}

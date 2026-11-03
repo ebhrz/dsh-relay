@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="theme-color" content="#ffffff" id="themeColor">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<title>DSH Remote</title>
+<script>
+// Sets the palette before the stylesheet paints: the saved choice, else the
+// system preference. app.js keeps it in sync afterwards.
+(function () {
+  try {
+    var raw = localStorage.getItem('dshRelaySettings')
+    var theme = raw ? JSON.parse(raw).theme : 'system'
+    var dark = theme === 'dark' || (theme !== 'light' && window.matchMedia
+      && window.matchMedia('(prefers-color-scheme: dark)').matches)
+    if (dark) {
+      document.documentElement.setAttribute('data-theme', 'dark')
+      var meta = document.getElementById('themeColor')
+      if (meta) meta.setAttribute('content', '#0a0d13')
+    }
+  } catch (error) {}
+})()
+</script>
+<link rel="icon" href="{{ICON}}" type="image/svg+xml">
+<link rel="stylesheet" href="{{CSS}}">
+</head>
+<body data-upstream="{{UPSTREAM}}">
+<div id="app" class="app" data-state="boot">
+  <header class="topbar">
+    <button id="menuBtn" class="icon-btn" aria-label="会话列表" title="会话列表">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h10"/></svg>
+    </button>
+    <div class="title-wrap">
+      <div class="title" id="sessionTitle">正在连接…</div>
+      <div class="subtitle" id="sessionSub">DSH Remote</div>
+    </div>
+    <span class="conn" id="connDot" data-state="connecting" title="连接状态"></span>
+    <button id="newBtn" class="icon-btn" aria-label="新会话" title="新会话">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+    </button>
+  </header>
+
+  <div class="banner" id="banner" hidden></div>
+
+  <main class="stream" id="stream">
+    <div class="items" id="items"></div>
+    <div class="empty" id="empty" hidden></div>
+    <button class="jump" id="jumpBtn" hidden>回到最新 ↓</button>
+  </main>
+
+  <footer class="composer" id="composer">
+    <div class="composer-inner">
+      <div class="composer-tools">
+        <button class="chip" id="modelBtn" type="button" title="选择模型" hidden>
+          <span id="modelName">模型</span>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 10l4 4 4-4"/></svg>
+        </button>
+        <button class="chip" id="permBtn" type="button" title="权限模式" hidden>
+          <span id="permName">权限</span>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 10l4 4 4-4"/></svg>
+        </button>
+        <span class="spacer"></span>
+      </div>
+      <div class="pending-images" id="pendingImages" hidden></div>
+      <div class="composer-row">
+        <button id="attachBtn" class="round ghost attach" type="button" aria-label="添加图片" title="添加图片" disabled>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+        </button>
+        <textarea id="input" class="input" rows="1" placeholder="给 agent 发消息…"
+          autocomplete="off" autocapitalize="sentences" spellcheck="false" enterkeyhint="send"></textarea>
+        <button id="stopBtn" class="round stop" aria-label="停止" title="停止" hidden>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="2"/></svg>
+        </button>
+        <button id="sendBtn" class="round send" aria-label="发送" title="发送" disabled>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6"/></svg>
+        </button>
+      </div>
+    </div>
+    <input type="file" id="fileInput" accept="image/*" multiple hidden>
+  </footer>
+
+  <div class="scrim" id="scrim" hidden></div>
+  <aside class="drawer" id="drawer" hidden aria-label="会话列表">
+    <div class="drawer-head">
+      <div>
+        <div class="drawer-title">会话</div>
+        <div class="drawer-sub" id="deviceLine">DSH Remote</div>
+      </div>
+      <button class="icon-btn" id="drawerClose" aria-label="关闭">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+    <div class="drawer-body" id="sessions"></div>
+    <div class="drawer-foot">
+      <button class="link-btn" id="settingsLink" type="button">设置</button>
+      <button class="link-btn" id="terminalLink" type="button">打开终端</button>
+      <button class="link-btn" id="desktopLink" type="button">打开完整桌面界面</button>
+      <button class="link-btn" id="rotateLink" type="button">重新配对</button>
+    </div>
+  </aside>
+
+  <div class="sheet" id="modelSheet" hidden>
+    <div class="sheet-card">
+      <div class="sheet-head">
+        <div class="sheet-title">选择模型</div>
+        <button class="icon-btn" id="modelClose" aria-label="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      </div>
+      <div class="sheet-body" id="modelList"></div>
+    </div>
+  </div>
+
+  <div class="sheet" id="permSheet" hidden>
+    <div class="sheet-card">
+      <div class="sheet-head">
+        <div class="sheet-title">权限 · 当前会话</div>
+        <button class="icon-btn" id="permClose" aria-label="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      </div>
+      <div class="sheet-body" id="permBody"></div>
+    </div>
+  </div>
+
+  <div class="sheet" id="settingsSheet" hidden>
+    <div class="sheet-card">
+      <div class="sheet-head">
+        <div class="sheet-title">设置</div>
+        <button class="icon-btn" id="settingsClose" aria-label="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      </div>
+      <div class="sheet-body" id="settingsBody"></div>
+    </div>
+  </div>
+
+  <div class="sheet" id="actionSheet" hidden>
+    <div class="sheet-card">
+      <div class="sheet-head">
+        <div class="sheet-title" id="actionTitle">操作</div>
+        <button class="icon-btn" id="actionClose" aria-label="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      </div>
+      <div class="sheet-body" id="actionList"></div>
+    </div>
+  </div>
+
+  <div class="terminal" id="terminalPanel" hidden>
+    <div class="terminal-head">
+      <button class="icon-btn" id="terminalBack" aria-label="关闭终端"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg></button>
+      <div class="terminal-title" id="terminalTitle">终端</div>
+      <button class="term-btn" id="terminalNew" type="button">新建</button>
+      <button class="term-btn" id="terminalClose" type="button">关闭</button>
+    </div>
+    <pre class="terminal-out" id="terminalOut"></pre>
+    <div class="terminal-input-row">
+      <button class="term-btn" id="terminalCtrlC" type="button">Ctrl-C</button>
+      <input class="terminal-input" id="terminalInput" placeholder="输入命令，回车执行" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <button class="round send term-send" id="terminalSend" type="button" aria-label="发送">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <div class="image-viewer" id="imageViewer" hidden>
+    <img id="imageViewerImg" alt="">
+  </div>
+
+  <div class="toast" id="toast" hidden></div>
+  <div class="modal" id="modal" hidden>
+    <div class="modal-card">
+      <div class="modal-title" id="modalTitle"></div>
+      <div class="modal-body" id="modalBody"></div>
+      <div class="modal-actions">
+        <button class="btn ghost" id="modalCancel">取消</button>
+        <button class="btn primary" id="modalOk">确定</button>
+      </div>
+    </div>
+  </div>
+</div>
+<script src="{{NACL}}"></script>
+<script src="{{JS}}"></script>
+</body>
+</html>

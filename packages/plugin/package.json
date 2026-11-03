@@ -1,0 +1,63 @@
+{
+  "name": "dsh-relay-bridge",
+  "version": "0.10.3",
+  "description": "Remote-control your local DeepSeek Harness from a phone through your own zero-knowledge relay: phone-first page, QR pairing, end-to-end encryption, approvals, full desktop UI fallback.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./src/client/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "cordis.patch.yml"
+  ],
+  "scripts": {
+    "test": "node test/run.mjs",
+    "test:ui": "node test/mobile-ui.test.mjs",
+    "check": "node scripts/check-syntax.mjs",
+    "dev:mock": "node scripts/mobile-mock.mjs",
+    "start:relay": "node ../relay/src/index.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "remote-control",
+    "relay",
+    "mobile",
+    "end-to-end-encryption",
+    "tweetnacl"
+  ],
+  "engines": {
+    "dsh": "^0.2.1-rc.2",
+    "node": ">=22"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4",
+    "tweetnacl": "^1.0.3",
+    "ws": "^8.18.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ebhrz/dsh-relay.git",
+    "directory": "packages/plugin"
+  },
+  "homepage": "https://github.com/ebhrz/dsh-relay#readme",
+  "bugs": {
+    "url": "https://github.com/ebhrz/dsh-relay/issues"
+  }
+}
