@@ -1,4 +1,4 @@
-// dsh-relay-bridge host side.
+// dsh-relay-phone host side.
 //
 // Owns the device identity, the outbound relay connection (TOFU-pinned WSS,
 // HMAC registration gate), the pairing/auth service, the sealing pump that
@@ -87,7 +87,7 @@ export default class RelayBridgeService extends Service {
     ctx.effect(() => () => {
       this.stopChannel()
       this.mobileBridge.dispose()
-    }, 'dsh-relay-bridge: relay channel')
+    }, 'dsh-relay-phone: relay channel')
     registerPanel(ctx, this)
     registerFiles(ctx)
 

@@ -67,14 +67,14 @@ function waitForText(chunks, needle) {
   })
   const { pump, chunks, isClosed } = pumpAgainst(server.address().port)
   pump.handleStreamData(7, Buffer.from(
-    `GET /c/ABCD1234/plugins/??dsh-relay-bridge/client.js&rev=deadbeef&g=${GATE} HTTP/1.1\r\n`
+    `GET /c/ABCD1234/plugins/??dsh-relay-phone/client.js&rev=deadbeef&g=${GATE} HTTP/1.1\r\n`
     + 'Host: relay.example:8889\r\n'
     + 'Origin: http://relay.example:8889\r\n'
     + 'Cookie: __relay_t=relay-ticket\r\n'
     + 'Connection: keep-alive\r\n\r\n'))
   await waitForText(chunks, '\r\n\r\nok')
   assert.equal(seen.length, 1)
-  assert.equal(seen[0].url, '/plugins/??dsh-relay-bridge/client.js&rev=deadbeef')
+  assert.equal(seen[0].url, '/plugins/??dsh-relay-phone/client.js&rev=deadbeef')
   assert.equal(seen[0].headers.host, `127.0.0.1:${server.address().port}`)
   assert.equal(seen[0].headers.origin, `http://127.0.0.1:${server.address().port}`)
   assert.equal(seen[0].headers.cookie, 'dsh-auth-test=v1.test.sig', 'upstream carries the DSH session cookie, not the relay ticket')

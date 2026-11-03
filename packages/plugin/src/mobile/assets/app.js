@@ -3,7 +3,7 @@
  * Talks only to the plugin's own mobile API (`/__relay/m/rpc` + a sealed
  * WebSocket), so the phone renders a small native-feeling chat UI instead of
  * replaying the desktop three-column web app. No frameworks, no build step:
- * this file is served directly by dsh-relay-bridge under /c/<device>/m.
+ * this file is served directly by dsh-relay-phone under /c/<device>/m.
  *
  * Wire frames (host side: packages/plugin/src/mobile/bridge.js):
  *   rpc  {id, method, params} -> {id, ok, result|error}

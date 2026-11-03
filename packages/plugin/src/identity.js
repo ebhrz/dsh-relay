@@ -1,4 +1,4 @@
-// Device identity for dsh-relay-bridge.
+// Device identity for dsh-relay-phone.
 //
 // Everything here stays on this machine (0600 file under $DSH_HOME/plugin-data):
 //   id        8-char device id shown in the entry URL
@@ -30,7 +30,7 @@ function dshHome() {
 }
 
 export function identityDir() {
-  return path.join(dshHome(), 'plugin-data', 'dsh-relay-bridge')
+  return path.join(dshHome(), 'plugin-data', 'dsh-relay-phone')
 }
 
 export function identityPath() {

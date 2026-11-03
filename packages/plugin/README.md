@@ -1,4 +1,4 @@
-# dsh-relay-bridge
+# dsh-relay-phone
 
 DSH plugin that makes your local DeepSeek Harness reachable from your phone through a relay you host yourself.
 
@@ -16,7 +16,7 @@ Restart `dsh web` afterwards (the plugin is host-side code), then configure it a
 
 ## Configuration
 
-Saved by the panel to `~/.dsh/plugin-data/dsh-relay-bridge/config.json`, which overrides the defaults in `cordis.patch.yml`:
+Saved by the panel to `~/.dsh/plugin-data/dsh-relay-phone/config.json`, which overrides the defaults in `cordis.patch.yml`:
 
 | Key | Meaning |
 |---|---|

@@ -34,7 +34,7 @@ dsh-relay 把它拆成三块：
 | 组件 | 运行位置 | 职责 |
 |---|---|---|
 | `dsh-relay-server` | 你自己的小服务器 | 哑路由：只解析请求首行，转发字节，不存任何数据 |
-| `dsh-relay-bridge` | 你的机器，跑在 `dsh web` 里 | 设备身份、配对、加密、回放到本机 DSH |
+| `dsh-relay-phone` | 你的机器，跑在 `dsh web` 里 | 设备身份、配对、加密、回放到本机 DSH |
 | 手机页 | 手机浏览器 | 通过端到端加密帧直接调用 DSH 宿主 API |
 
 ## 工作原理
@@ -43,7 +43,7 @@ dsh-relay 把它拆成三块：
 手机浏览器 ──HTTP(S)──► dsh-relay-server（你的服务器，哑路由）
                           │  WSS（自签 TLS + 指纹钉住 + HMAC 注册门）
                           ▼
-                dsh-relay-bridge（跑在你的 dsh web 里）
+                dsh-relay-phone（跑在你的 dsh web 里）
                   ├─ 认证门：PSK 挑战-应答 → 密文 cookie 票据
                   ├─ 手机页：/c/<id>/m + 密封 RPC/WS → 宿主会话 API
                   ├─ 密封泵：Host/Origin 改写回放 → 本进程 webServer 端口
@@ -107,7 +107,7 @@ node packages/relay/src/tls-terminator.mjs --port 8443 --upstream 8889 --cert-di
 
 ```sh
 cd dsh-relay
-npm install --workspace dsh-relay-bridge
+npm install --workspace dsh-relay-phone
 dsh plugin --profile web add link:./packages/plugin
 ```
 
@@ -134,7 +134,7 @@ dsh plugin --profile web add link:./packages/plugin
 | `autoStart` | `true` | 启动即连接；设为 `false` 则只在面板里手动连接 |
 | `dshHost` / `dshPort` | `127.0.0.1` / `3080` | 兼容用回退值；可用时泵以 `ctx.webServer` 为准 |
 
-状态目录：`~/.dsh/plugin-data/dsh-relay-bridge/`（`DSH_HOME` 可覆盖 `~/.dsh`），包含
+状态目录：`~/.dsh/plugin-data/dsh-relay-phone/`（`DSH_HOME` 可覆盖 `~/.dsh`），包含
 `identity.json`、`config.json`、`sessions.json`、`audit.log`。删除 `identity.json`
 等同于轮换设备身份。
 
@@ -142,7 +142,7 @@ dsh plugin --profile web add link:./packages/plugin
 
 ```
 packages/relay/      dsh-relay-server：手机监听、agent 监听、TLS 终结器
-packages/plugin/     dsh-relay-bridge：身份、配对、密封泵、文件、面板
+packages/plugin/     dsh-relay-phone：身份、配对、密封泵、文件、面板
   src/mobile/        手机页、宿主桥接、事件折叠、静态资源
   src/client/        DSH 加载的小型客户端 bundle
   test/              纯 loopback 测试（不需要中继，也不需要 dsh web）

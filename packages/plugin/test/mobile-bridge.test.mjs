@@ -14,7 +14,7 @@ import { MobileBridge } from '../src/mobile/bridge.js'
 import { foldSnapshot } from '../src/mobile/fold.js'
 
 // Audit/identity writes must never reach the developer's real ~/.dsh.
-process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-relay-bridge-test-'))
+process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-relay-phone-test-'))
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 

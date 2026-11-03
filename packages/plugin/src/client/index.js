@@ -1,4 +1,4 @@
-// dsh-relay-bridge browser half: pins the phone-entry action (entry link +
+// dsh-relay-phone browser half: pins the phone-entry action (entry link +
 // QR) into the DSH web sidebar's `sidebar.footer.action` list.
 //
 // DSH 0.2 ships its own right-sidebar terminal, so the relay no longer renders
@@ -11,7 +11,7 @@
 // plugin needs no bundler.
 
 window.__ModuleLoader__.load({
-  id: 'dsh-relay-bridge',
+  id: 'dsh-relay-phone',
   factory: (require) => {
     const React = require('react')
     const { createPortal } = require('react-dom')
@@ -80,7 +80,7 @@ window.__ModuleLoader__.load({
       style.id = 'dsh-relay-panel-style'
       // Lets the 0.2 module system evict this stylesheet when the plugin is
       // disabled; it only owns tags it can identify.
-      style.setAttribute('data-plugin', 'dsh-relay-bridge')
+      style.setAttribute('data-plugin', 'dsh-relay-phone')
       style.textContent = `
 .dsh-relay-entry-btn{display:flex;align-items:center;gap:8px;width:100%;padding:8px 10px;background:transparent;border:0;border-radius:8px;color:inherit;cursor:pointer;font-size:13px;line-height:1;text-align:left}
 .dsh-relay-entry-btn:hover{background:rgba(127,127,127,.15)}
@@ -298,7 +298,7 @@ window.__ModuleLoader__.load({
     }
 
     function apply(ctx) {
-      ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-relay-bridge: panel dictionaries')
+      ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-relay-phone: panel dictionaries')
       // `sidebar.footer.action` is the sidebar shell's list slot above
       // Settings; `slots.inject` waits for ui-sidebar's declaration so load
       // order between the two plugins never matters.

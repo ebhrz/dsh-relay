@@ -106,7 +106,7 @@ export async function registerPanel(ctx, service) {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
       res.end(buildPage())
     },
-  }), 'dsh-relay-bridge: panel page')
+  }), 'dsh-relay-phone: panel page')
 
   ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
@@ -198,7 +198,7 @@ export async function registerPanel(ctx, service) {
 
       return reply(404, { ok: false, error: 'unknown action' })
     },
-  }), 'dsh-relay-bridge: panel api')
+  }), 'dsh-relay-phone: panel api')
 }
 
 function buildPage() {
@@ -206,7 +206,7 @@ function buildPage() {
 <html lang="zh">
 <head>
 <meta charset="utf-8">
-<title>dsh-relay-bridge 控制台</title>
+<title>dsh-relay-phone 控制台</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
   :root{color-scheme:light dark;--bg:#f6f7f9;--card:#fff;--line:#e3e7ee;--text:#101828;--muted:#5b6577;

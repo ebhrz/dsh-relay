@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// dsh-relay-server — zero-knowledge relay for dsh-relay-bridge.
+// dsh-relay-server — zero-knowledge relay for dsh-relay-phone.
 //
 // Two listeners:
 //   --port (HTTP, phones)   /c/<id>/<path>?g=<gate>  → raw TCP relay into the
@@ -289,13 +289,13 @@ function handlePhoneSocket(args, socket) {
         var refLine = headText2.match(/referer:\s*([^\r\n]*)/i)
         log(`404-noprefix ${line.split(' ').slice(0, 2).join(' ')} ref=${refLine ? refLine[1].slice(0, 70) : 'none'}`)
         return tinyResponse(socket, 404, 'Not Found',
-          `dsh-relay: unknown path ${rawPath}. Phones open /c/<id>/?g=<gate> links from the dsh-relay-bridge settings page.\n`)
+          `dsh-relay: unknown path ${rawPath}. Phones open /c/<id>/?g=<gate> links from the dsh-relay-phone settings page.\n`)
       }
       const id = m[1]
       const entry = agents.get(id)
       if (!entry) {
         return tinyResponse(socket, 503, 'Service Unavailable',
-          'dsh-relay: device is offline (its dsh-relay-bridge is not connected). Retry later.\n')
+          'dsh-relay: device is offline (its dsh-relay-phone is not connected). Retry later.\n')
       }
       const params = new URLSearchParams(rawQuery)
       const gate = params.get('g') ?? gateCookie

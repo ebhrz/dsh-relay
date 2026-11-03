@@ -1,7 +1,7 @@
 {
   "name": "dsh-relay-server",
   "version": "0.1.0",
-  "description": "Zero-knowledge relay for dsh-relay-bridge: no accounts, no database, routes end-to-end encrypted streams by device id.",
+  "description": "Zero-knowledge relay for dsh-relay-phone: no accounts, no database, routes end-to-end encrypted streams by device id.",
   "type": "module",
   "bin": {
     "dsh-relay-server": "src/index.mjs"

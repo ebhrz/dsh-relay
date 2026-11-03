@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Email **ebhrz1@163.com** with the details, or open a private security advisory on GitHub. Please do not file a public issue.
+Email **ebhrz1@gmail.com** with the details, or open a private security advisory on GitHub. Please do not file a public issue.
 
 Include what you did, what you observed, and what an attacker gains. A proof of concept helps; so does the version (`packages/plugin/package.json`) and how the relay is exposed (TLS terminator, reverse proxy, plain HTTP, private network).
 

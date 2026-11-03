@@ -1,6 +1,6 @@
 # dsh-relay-server
 
-A zero-knowledge relay for [`dsh-relay-bridge`](../plugin): it pairs a phone connection with your machine's outbound agent connection and forwards bytes, without accounts, a database, or the ability to read payloads.
+A zero-knowledge relay for [`dsh-relay-phone`](../plugin): it pairs a phone connection with your machine's outbound agent connection and forwards bytes, without accounts, a database, or the ability to read payloads.
 
 Part of [dsh-relay](https://github.com/ebhrz/dsh-relay). Read the [main README](https://github.com/ebhrz/dsh-relay#readme) for the architecture and security model.
 

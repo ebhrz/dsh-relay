@@ -1,6 +1,6 @@
 # 手机页（DSH Remote）— 设计与实现
 
-手机专用页面，替代"把桌面 DSH 三栏界面塞进手机"的旧路径。页面由 `dsh-relay-bridge`
+手机专用页面，替代"把桌面 DSH 三栏界面塞进手机"的旧路径。页面由 `dsh-relay-phone`
 自己提供，后端直接调用 DSH **原生会话 API**（`ctx.sessionController`），不经过桌面前端
 bundle、不解析 DOM、不重放整个 web UI。
 

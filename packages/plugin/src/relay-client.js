@@ -174,7 +174,7 @@ export class RelayClient extends EventTarget {
         this.pump.handleStreamData(sid, data.subarray(4))
       } catch (error) {
         // A bug in stream handling must never take the whole connection down.
-        console.error('[dsh-relay-bridge] stream error', sid, error)
+        console.error('[dsh-relay-phone] stream error', sid, error)
         this.pump.handleStreamClose(sid)
         this.closeStream(sid)
       }

@@ -1,4 +1,4 @@
-// Crypto core for dsh-relay-bridge (host side).
+// Crypto core for dsh-relay-phone (host side).
 //
 // Uses tweetnacl on BOTH ends deliberately: the phone reaches us over plain
 // HTTP to a bare IP in the common deployment, where WebCrypto (crypto.subtle)

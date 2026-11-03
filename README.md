@@ -32,7 +32,7 @@ dsh-relay splits the problem in three:
 | Piece | Where it runs | What it does |
 |---|---|---|
 | `dsh-relay-server` | A small VPS you own | Dumb router: parses one request line, forwards bytes, stores nothing |
-| `dsh-relay-bridge` | Your machine, inside `dsh web` | Identity, pairing, encryption, replay to the local DSH |
+| `dsh-relay-phone` | Your machine, inside `dsh web` | Identity, pairing, encryption, replay to the local DSH |
 | Phone page | Your phone's browser | Talks to the DSH host API through end-to-end encrypted frames |
 
 ## How it works
@@ -41,7 +41,7 @@ dsh-relay splits the problem in three:
 phone browser ──HTTP(S)──► dsh-relay-server (your VPS, dumb router)
                               │  WSS (self-signed TLS + pinned fingerprint + HMAC gate)
                               ▼
-                    dsh-relay-bridge (inside your dsh web)
+                    dsh-relay-phone (inside your dsh web)
                       ├─ auth gate: PSK challenge-response → encrypted cookie
                       ├─ mobile page:   /c/<id>/m + sealed RPC/WS → host session API
                       ├─ sealed pump:   Host/Origin rewrite, replay to ctx.webServer
@@ -98,7 +98,7 @@ Run either process under systemd, `tmux`, or your supervisor of choice; there is
 
 ```sh
 cd dsh-relay
-npm install --workspace dsh-relay-bridge
+npm install --workspace dsh-relay-phone
 dsh plugin --profile web add link:./packages/plugin
 ```
 
@@ -122,13 +122,13 @@ Ordered by precedence: the panel's saved `config.json` wins over the defaults in
 | `autoStart` | `true` | Connect on startup; leave `false` to connect only from the panel |
 | `dshHost` / `dshPort` | `127.0.0.1` / `3080` | Legacy fallbacks; the pump targets `ctx.webServer` when available |
 
-State lives in `~/.dsh/plugin-data/dsh-relay-bridge/` (`DSH_HOME` overrides `~/.dsh`): `identity.json`, `config.json`, `sessions.json`, `audit.log`. Deleting `identity.json` is equivalent to rotating the device identity.
+State lives in `~/.dsh/plugin-data/dsh-relay-phone/` (`DSH_HOME` overrides `~/.dsh`): `identity.json`, `config.json`, `sessions.json`, `audit.log`. Deleting `identity.json` is equivalent to rotating the device identity.
 
 ## Repository layout
 
 ```
 packages/relay/      dsh-relay-server — phone listener, agent listener, TLS terminator
-packages/plugin/     dsh-relay-bridge — identity, pairing, sealed pump, files, panel
+packages/plugin/     dsh-relay-phone — identity, pairing, sealed pump, files, panel
   src/mobile/        phone page, host bridge, event folding, static assets
   src/client/        the small client bundle DSH loads in the browser
   test/              hermetic test suite (no relay, no dsh web)

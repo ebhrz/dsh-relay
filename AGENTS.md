@@ -5,7 +5,7 @@ This repository is a small, security-sensitive codebase. Read this before changi
 ## Ground rules
 
 - **Never restart or kill the `dsh web` process you are running inside.** If you are an agent hosted by DSH, that process is your own host: killing it ends your session and takes the GUI down with it. When a change needs host-side code reloaded, say so in your final message and let the human restart it.
-- **Do not put secrets in the tree.** No live relay keys, hostnames, deployment paths, or personal home directories. Configuration that identifies a deployment belongs in `~/.dsh/plugin-data/dsh-relay-bridge/config.json`, never in `cordis.patch.yml` or a test.
+- **Do not put secrets in the tree.** No live relay keys, hostnames, deployment paths, or personal home directories. Configuration that identifies a deployment belongs in `~/.dsh/plugin-data/dsh-relay-phone/config.json`, never in `cordis.patch.yml` or a test.
 - **Keep tests hermetic.** `npm test` must pass with no relay, no network, and no running DSH. Anything that needs a deployment goes in `scripts/` as a probe, never in `test/`.
 
 ## Layout

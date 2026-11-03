@@ -7,7 +7,7 @@
 //   node scripts/probe-relay-integration.mjs
 //
 // Reads the relay coordinates the panel saved (relayHost/relayPort/agentPort/
-// relayKey) from $DSH_HOME/plugin-data/dsh-relay-bridge/config.json, and uses a
+// relayKey) from $DSH_HOME/plugin-data/dsh-relay-phone/config.json, and uses a
 // throwaway device identity so the real identity.json is never touched.
 import http from 'node:http'
 import fs from 'node:fs'

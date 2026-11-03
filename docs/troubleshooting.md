@@ -35,7 +35,7 @@ Relay log lines worth knowing:
 
 Set `DSH_RELAY_DEBUG=1` before starting `dsh web` to get per-request tracing from the pump. Without it, only state transitions and errors are logged (the pump sees every phone request, so unconditional tracing would flood the console).
 
-The panel at `/relay-bridge/panel` shows the current status and the last transition, and `~/.dsh/plugin-data/dsh-relay-bridge/audit.log` keeps the history across restarts.
+The panel at `/relay-bridge/panel` shows the current status and the last transition, and `~/.dsh/plugin-data/dsh-relay-phone/audit.log` keeps the history across restarts.
 
 ## 5. Common symptoms
 
@@ -70,7 +70,7 @@ The panel at `/relay-bridge/panel` shows the current status and the last transit
 | Re-pair one phone | Scan the QR again (same identity) |
 | Revoke every phone | Panel → regenerate identity (deletes `identity.json`, rotates the PSK) |
 | Change the relay key | Generate a new key on the relay, restart it, update the panel, restart `dsh web` |
-| Start clean on the host | Stop `dsh web`, remove `~/.dsh/plugin-data/dsh-relay-bridge/`, restart, pair again |
+| Start clean on the host | Stop `dsh web`, remove `~/.dsh/plugin-data/dsh-relay-phone/`, restart, pair again |
 
 Rotating the identity keeps the relay's device registry entry until the new device id registers; the old entry is harmless but can be dropped from the relay's in-memory registry by restarting it.
 

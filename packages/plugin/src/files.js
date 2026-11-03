@@ -55,7 +55,7 @@ export function registerFiles(ctx) {
       })
       fs.createReadStream(target).pipe(res)
     },
-  }), 'dsh-relay-bridge: file shuttle')
+  }), 'dsh-relay-phone: file shuttle')
 }
 
 function renderListing(dir) {

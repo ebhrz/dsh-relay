@@ -95,7 +95,7 @@ export class PumpManager {
     try {
       this.step(sid, stream, chunk)
     } catch (error) {
-      console.error('[dsh-relay-bridge] stream error', sid, error)
+      console.error('[dsh-relay-phone] stream error', sid, error)
       auditLog(`stream-error sid=${sid} ${error.message}`)
       this.closeStream(sid)
     }
@@ -582,7 +582,7 @@ export class PumpManager {
       if (this.streams.get(sid)?.upstream === upstream) {
         this.streams.delete(sid)
         this.clearIdle(stream)
-        this.respondInline(sid, 502, 'Bad Gateway', 'dsh-relay-bridge: upstream failed')
+        this.respondInline(sid, 502, 'Bad Gateway', 'dsh-relay-phone: upstream failed')
         this.client?.closeStream(sid)
       }
     })
@@ -718,7 +718,7 @@ export class PumpManager {
       this.streams.delete(sid)
       this.clearIdle(stream)
       this.client?.closeStream(sid)
-      if (hadError) this.respondInline(sid, 502, 'Bad Gateway', 'dsh-relay-bridge: upstream failed')
+      if (hadError) this.respondInline(sid, 502, 'Bad Gateway', 'dsh-relay-phone: upstream failed')
     }
     upstream.on('close', () => gone(false))
     upstream.on('error', () => gone(true))
