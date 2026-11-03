@@ -85,6 +85,7 @@ export class MobileBridge {
     this.continued = new Map() // key (`q:<callId>`) -> {sessionId, callId, questions}
     this.titles = new Map() // sessionId -> title from list rows
     this.ownTerminals = new Map() // `${sessionId}:${id}` -> plugin-owned fallback PTY
+    this.terminalCursors = new Map() // `${sessionId}:${id}` -> last line index sent to the phone
     this.disposers = []
     this.started = false
     this.phoneCount = 0
@@ -989,8 +990,10 @@ export class MobileBridge {
     const sessionId = params?.sessionId
     const id = params?.terminalId
     if (typeof sessionId !== 'string' || typeof id !== 'string') throw fail('bad-request', 'sessionId and terminalId required')
+    const key = `${sessionId}:${id}`
+    if (params?.reset === true) this.terminalCursors.delete(key)
     const owned = this.ownTerminal(sessionId, id)
-    if (owned) return this.readOwnTerminal(owned, Number.isFinite(params?.offset) ? params.offset : 0, clampInt(params?.count, 20, 400, 120))
+    if (owned) return this.slimTerminal(key, this.readOwnTerminal(owned, Number.isFinite(params?.offset) ? params.offset : 0, clampInt(params?.count, 20, 400, 120)))
     const agent = await this.resolveLiveAgent(sessionId)
     const registry = this.presetTerminals(agent)
     if (!registry) throw fail('unavailable', 'terminal service unavailable for this agent')
@@ -998,13 +1001,36 @@ export class MobileBridge {
       offset: Number.isFinite(params?.offset) ? params.offset : 0,
       count: clampInt(params?.count, 20, 400, 120),
     })
-    return {
+    return this.slimTerminal(key, {
       text: result?.text ?? '',
       totalLines: result?.totalLines ?? 0,
       lineBegin: result?.lineBegin ?? 0,
       lineEnd: result?.lineEnd ?? 0,
       truncated: result?.truncated === true,
+    })
+  }
+
+  /**
+   * Send only what the phone has not seen yet.
+   *
+   * The panel polls once a second, and re-sending the last 300 lines every time
+   * is what made an open terminal the most expensive thing on the relay. The
+   * read above stays as wide as before (it is a local read), but the wire now
+   * carries just the new lines; when nothing changed the reply is an empty
+   * string. `appended` tells the page whether to append or replace, and a jumped
+   * `lineBegin` (ring buffer overflow) forces a replace so no gap is hidden.
+   */
+  slimTerminal(key, fresh) {
+    const previous = this.terminalCursors.get(key)
+    this.terminalCursors.set(key, fresh.lineEnd)
+    if (!previous || fresh.lineBegin > previous) {
+      return { ...fresh, appended: false }
     }
+    const skip = Math.max(0, previous - fresh.lineBegin)
+    if (!fresh.text) return { ...fresh, text: '', appended: true }
+    const lines = fresh.text.split('\n')
+    if (skip >= lines.length) return { ...fresh, text: '', appended: true }
+    return { ...fresh, text: lines.slice(skip).join('\n'), appended: true }
   }
 
   async terminalSend(params) {

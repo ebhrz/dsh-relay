@@ -81,9 +81,11 @@ git clone https://github.com/ebhrz/dsh-relay.git
 cd dsh-relay
 npm install --workspace dsh-relay-server
 
-# keep this key: the bridge needs the same value
-KEY="$(openssl rand -hex 24)"
-node packages/relay/src/index.mjs --port 8889 --agent-port 9000 --key "$KEY"
+# one key per user, with a daily traffic quota (100MB unless you pass --quota)
+node packages/relay/src/index.mjs tenant add --name alice --quota 100MB
+# → prints alice's relay key once; that value goes into her DSH panel
+
+node packages/relay/src/index.mjs --port 8889 --agent-port 9000
 ```
 
 Open **two** ports: `8889` for phones and `9000` for agents. To terminate TLS in front of the phone port, either pass `--tls-cert/--tls-key` (the relay then speaks HTTPS/WSS directly) or run the included terminator behind a certificate you already have:
@@ -92,7 +94,14 @@ Open **two** ports: `8889` for phones and `9000` for agents. To terminate TLS in
 node packages/relay/src/tls-terminator.mjs --port 8443 --upstream 8889 --cert-dir /path/to/certs
 ```
 
-Run either process under systemd, `tmux`, or your supervisor of choice; there is no state to back up except the generated agent certificate in `~/.dsh-relay`.
+Run either process under systemd, `tmux`, or your supervisor of choice. State is the generated agent certificate plus `tenants.json` (keys as hashes, today's usage) in `~/.dsh-relay`.
+
+**Tenants are optional.** A single-user deployment can keep one shared `--key` and skip metering entirely:
+
+```sh
+KEY="$(openssl rand -hex 24)"
+node packages/relay/src/index.mjs --port 8889 --agent-port 9000 --key "$KEY"
+```
 
 ### 2. Local bridge
 
@@ -118,7 +127,7 @@ Ordered by precedence: the panel's saved `config.json` wins over the defaults in
 | `relayHost` | — | Relay hostname or IP |
 | `relayPort` | — | Relay phone port (e.g. `8889`) |
 | `agentPort` | `relayPort + 1` | Relay agent port (e.g. `9000`) |
-| `relayKey` | — | Shared key, must match the server's `--key` |
+| `relayKey` | — | The key this deployment was given: a tenant key, or the server's admin `--key` |
 | `autoStart` | `true` | Connect on startup; leave `false` to connect only from the panel |
 | `dshHost` / `dshPort` | `127.0.0.1` / `3080` | Legacy fallbacks; the pump targets `ctx.webServer` when available |
 

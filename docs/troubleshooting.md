@@ -61,6 +61,10 @@ The panel at `/relay-bridge/panel` shows the current status and the last transit
 | Permission chip shows 「权限」 instead of a preset | The client read the projection's host-internal shape (`{preset, sandbox, approval}`) while the wire view is `{currentValue}`; every field came back undefined, so nothing matched a preset (fixed in 0.9.1). Earlier causes on the way: a missing abort signal (0.8.4) | The page posts what it received (`perm session preset=… sandbox=…`) to the audit log. A cache checkpoint under `~/.dsh/storages/session_projcache/sessions/` holds the host-side state and proves whether the projection was ever empty |
 | Phone terminal shows garbage such as `[?1004h` or `[4;22H` | The panel is a line buffer, not a terminal emulator, so the VT control sequences a shell emits were printed as text | Fixed in 0.10.3: the page strips CSI/OSC/naked-ESC sequences and normalises CR before display; the wire still carries the raw bytes |
 | New session shows an empty "choose a model" | The model catalog could not be read, so the deployment default is unknown | Check that `model.catalog` answers; the chip falls back to the last model this phone picked, then to the host default |
+| Relay says the key is unknown or disabled | The key matches no tenant on that relay, or the tenant was disabled | `dsh-relay-server tenant list` shows each key id; the panel prints the relay reason verbatim |
+| Relay says today's traffic is used up | The tenant hit its daily quota (default 100 MB, UTC day). The relay cuts the connection and refuses re-registration until tomorrow | `dsh-relay-server tenant reset <name>` gives the day back; `tenant add --quota` changes the limit |
+| Two machines share one tenant key | The relay allows one agent per tenant: the newest registration replaces and drops the older connection | Give each machine its own `tenant add` |
+
 | A new session ignores the model you picked last | The host persists the pick through `agentDefaultModel.saveSelection`, which needs a writable profile config | Check the desktop picker applies it as well; the phone also caches the pick in `localStorage` (`dshRelayLastModel`) |
 
 ## 6. Resetting things

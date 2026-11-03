@@ -22,6 +22,12 @@ import path from 'node:path'
 import os from 'node:os'
 import { execFileSync } from 'node:child_process'
 import { WebSocketServer } from 'ws'
+import {
+  DEFAULT_QUOTA_BYTES,
+  TenantStore,
+  formatBytes,
+  parseQuota,
+} from './tenants.js'
 
 const VERSION = '0.1.0'
 
@@ -32,6 +38,7 @@ function parseArgs(argv) {
     port: 8889,
     agentPort: null, // default: port + 1
     key: process.env.DSH_RELAY_KEY ?? null,
+    quotaDefault: DEFAULT_QUOTA_BYTES,
     dataDir: path.join(os.homedir(), '.dsh-relay'),
     tlsCert: null,
     tlsKey: null,
@@ -49,6 +56,12 @@ function parseArgs(argv) {
       case '--host': args.host = next(); break
       case '--agent-host': args.agentHost = next(); break
       case '--key': args.key = next(); break
+      case '--quota-default': {
+        const parsed = parseQuota(next())
+        if (!parsed) fail('bad --quota-default (use e.g. 100MB)')
+        args.quotaDefault = parsed
+        break
+      }
       case '--data-dir': args.dataDir = next(); break
       case '--tls-cert': args.tlsCert = next(); break
       case '--tls-key': args.tlsKey = next(); break
@@ -59,8 +72,8 @@ function parseArgs(argv) {
       default: fail(`unknown argument ${a}`)
     }
   }
-  if (!args.key || args.key.length < 8) {
-    fail('--key is required (>= 8 chars). Example: --key "$(openssl rand -hex 24)"')
+  if (args.key != null && args.key.length < 8) {
+    fail('--key must be at least 8 chars (or omit it and use tenants instead)')
   }
   if (args.agentPort == null) args.agentPort = args.port + 1
   if (args.agentHost == null) args.agentHost = "0.0.0.0"
@@ -73,11 +86,21 @@ function usage() {
   --port <n>          HTTP listener for phones (default 8889)
   --agent-port <n>    WSS listener for agents (default port+1)
   --host <addr>       bind address (default 0.0.0.0)
-  --key <secret>      registration key; agents must prove knowledge via HMAC
+  --key <secret>      admin registration key (optional; tenants are the normal path)
+  --quota-default <n> daily quota for new tenants (default 100MB)
   --tls-cert <pem>    custom TLS cert for the agent listener (default: auto
                       self-signed into --data-dir)
   --tls-key <pem>     custom TLS key for the agent listener
-  --data-dir <dir>    state dir for the self-signed cert (default ~/.dsh-relay)
+  --data-dir <dir>    state dir for the cert and the tenant ledger (default ~/.dsh-relay)
+
+Tenants (one key per user, each with a daily traffic quota):
+
+  dsh-relay-server tenant add --name <name> [--quota 100MB] [--note text]
+  dsh-relay-server tenant list
+  dsh-relay-server tenant show <name>
+  dsh-relay-server tenant disable <name> | enable <name>
+  dsh-relay-server tenant reset <name>      (zero today's usage)
+  dsh-relay-server tenant remove <name>
 `
 }
 
@@ -111,11 +134,29 @@ function ensureSelfSignedCert(args) {
   const keyPath = path.join(args.dataDir, 'agent-key.pem')
   if (!fs.existsSync(certPath) || !fs.existsSync(keyPath)) {
     log('generating self-signed cert via openssl ...')
+    // Some Windows installs ship an openssl whose OPENSSL_CONF points at a file
+    // that does not exist, which makes any invocation fail. A config of our own
+    // removes that dependency without touching the machine's settings.
+    const confPath = path.join(args.dataDir, 'openssl.cnf')
+    fs.writeFileSync(confPath, [
+      '[req]',
+      'distinguished_name = dn',
+      'x509_extensions = v3',
+      'prompt = no',
+      '[dn]',
+      'CN = dsh-relay-agent',
+      '[v3]',
+      'basicConstraints = critical,CA:TRUE',
+      'keyUsage = digitalSignature,keyEncipherment',
+      'subjectAltName = DNS:dsh-relay-agent',
+      '',
+    ].join('\n'))
     try {
       execFileSync('openssl', [
         'req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1',
         '-keyout', keyPath, '-out', certPath,
         '-days', '3650', '-nodes', '-subj', '/CN=dsh-relay-agent',
+        '-config', confPath,
       ], { stdio: 'pipe' })
     } catch (error) {
       fail(`cannot generate self-signed cert (openssl missing or misconfigured): ${error.message}\n` +
@@ -130,16 +171,20 @@ function ensureSelfSignedCert(args) {
 // ---------------------------------------------------------------------------
 
 class AgentEntry {
-  constructor(ws, gate) {
+  constructor(ws, gate, tenant = null) {
     this.ws = ws
     this.gate = gate // hex string supplied by the agent (derived from its PSK)
     this.streams = new Set() // sids
     this.alive = true
+    this.tenant = tenant // null for the legacy admin --key
+    this.quotaTripped = false
   }
 }
 
 const agents = new Map() // id -> AgentEntry
 const phoneByStream = new Map() // sid -> PhoneConn
+const tenantAgent = new Map() // tenant id -> { id, entry }
+let tenantStore = null // set in main()
 let nextSid = 1
 
 function allocSid() {
@@ -147,6 +192,33 @@ function allocSid() {
   nextSid = nextSid + 1
   if (nextSid > 0xffffffff) nextSid = 1
   return sid
+}
+
+/** Drop one agent connection and every phone stream riding on it. */
+function closeEntry(entry, reason) {
+  if (!entry) return
+  entry.alive = false
+  for (const sid of [...entry.streams]) {
+    const phone = phoneByStream.get(sid)
+    if (phone) phone.destroy(false)
+  }
+  try { entry.ws.send(JSON.stringify({ t: 'rejected', reason })) } catch {}
+  try { entry.ws.terminate() } catch {}
+}
+
+/**
+ * Book bytes against the tenant's day and cut the connection the moment the
+ * quota is reached — once, not on every later frame.
+ */
+function charge(entry, bytes) {
+  const tenant = entry?.tenant
+  if (!tenant || !tenantStore || !(bytes > 0)) return
+  const { over } = tenantStore.charge(tenant, bytes)
+  if (!over || entry.quotaTripped) return
+  entry.quotaTripped = true
+  log(`quota exhausted tenant=${tenant.id} used=${formatBytes(tenant.usedBytesDay)} limit=${formatBytes(tenant.quotaBytesDay)}`)
+  tenantStore.saveIfDirty()
+  closeEntry(entry, 'quota-exceeded')
 }
 
 function sidPrefix(sid) {
@@ -178,6 +250,8 @@ class PhoneConn {
     socket.setNoDelay(true)
     socket.on('data', (chunk) => {
       if (this.closed || entry.ws.readyState !== 1) return
+      charge(entry, chunk.length)
+      if (this.closed) return
       sendStream(entry, sid, chunk)
     })
     const finish = () => this.destroy(true)
@@ -385,6 +459,7 @@ function startAgentListener(args, tls) {
     let entry = null
     let id = null
     let helloGate = null // gate arrives in hello; used when register completes
+    let helloKeyId = null // tenant key id from hello (absent for the admin key)
     let pendingChallenge = null
     let registered = false
     let pongMisses = 0
@@ -415,6 +490,18 @@ function startAgentListener(args, tls) {
           if (typeof msg.gate !== 'string' || !/^[a-f0-9]{16,128}$/.test(msg.gate)) {
             return failConn('bad gate')
           }
+          helloKeyId = typeof msg.keyId === 'string' ? msg.keyId : null
+          if (helloKeyId !== null && !/^[a-f0-9]{12}$/.test(helloKeyId)) return failConn('bad key id')
+          // Refuse a spent or suspended tenant before spending a challenge on
+          // it. An unknown key id is NOT refused here: it may be the admin
+          // --key, which is verified at register time (the hash is not the key).
+          if (helloKeyId) {
+            const tenant = tenantStore?.byKeyId(helloKeyId) ?? null
+            if (tenant) {
+              const blocked = tenantStore.blocked(tenant)
+              if (blocked) return failConn(blocked)
+            }
+          }
           helloGate = msg.gate
           pendingChallenge = crypto.randomBytes(24).toString('hex')
           ws.send(JSON.stringify({ t: 'challenge', nonce: pendingChallenge }))
@@ -422,11 +509,39 @@ function startAgentListener(args, tls) {
         }
 
         if (msg.t === 'register' && pendingChallenge && !registered) {
-          const expected = crypto.createHmac('sha256', args.key)
+          // A tenant sends the id of its key; the legacy/admin key sends either
+          // nothing or an id that matches no tenant.
+          let tenant = helloKeyId ? (tenantStore?.byKeyId(helloKeyId) ?? null) : null
+          let secret = null
+          if (tenant) {
+            const blocked = tenantStore.blocked(tenant)
+            if (blocked) {
+              pendingChallenge = null
+              return failConn(blocked)
+            }
+            secret = tenant.secret
+          } else if (args.key) {
+            secret = args.key
+          } else {
+            pendingChallenge = null
+            return failConn('unknown-key')
+          }
+          const expected = crypto.createHmac('sha256', secret)
             .update(`${pendingChallenge}|${id}`).digest('hex')
           const proofOk = timingSafeEqual(String(msg.proof ?? ''), expected)
           pendingChallenge = null
           if (!proofOk) return failConn('bad key proof')
+
+          // One agent per tenant: the newest connection wins and the previous
+          // one is dropped (a demo machine should never be reachable twice).
+          if (tenant) {
+            const current = tenantAgent.get(tenant.id)
+            if (current && current.entry !== entry) {
+              log(`tenant ${tenant.id}: replacing agent ${current.id} with ${id}`)
+              closeEntry(current.entry, 'replaced')
+              if (agents.get(current.id) === current.entry) agents.delete(current.id)
+            }
+          }
           const previous = agents.get(id)
           if (previous) {
             // Same id reconnecting: replace the old connection cleanly.
@@ -438,10 +553,15 @@ function startAgentListener(args, tls) {
             try { previous.ws.terminate() } catch {}
             agents.delete(id)
           }
-          entry = new AgentEntry(ws, helloGate)
+          entry = new AgentEntry(ws, helloGate, tenant)
           agents.set(id, entry)
+          if (tenant) {
+            tenantAgent.set(tenant.id, { id, entry })
+            tenant.lastSeenAt = new Date().toISOString()
+            tenantStore.dirty = true
+          }
           registered = true
-          log(`agent registered id=${id}`)
+          log(`agent registered id=${id}${tenant ? ` tenant=${tenant.id}` : ' (admin key)'}`)
           ws.send(JSON.stringify({ t: 'registered' }))
           return
         }
@@ -458,6 +578,8 @@ function startAgentListener(args, tls) {
 
       // Binary frame: stream bytes going back to a phone.
       if (!entry || !registered || data.length < 4) return
+      charge(entry, data.length)
+      if (!entry.alive) return
       const sid = data.readUInt32BE(0)
       const phone = phoneByStream.get(sid)
       if (phone) phone.sendToClient(data.subarray(4))
@@ -471,7 +593,11 @@ function startAgentListener(args, tls) {
           const phone = phoneByStream.get(sid)
           if (phone) phone.destroy(false)
         }
-        log(`agent gone id=${id}`)
+        if (entry.tenant && tenantAgent.get(entry.tenant.id)?.entry === entry) {
+          tenantAgent.delete(entry.tenant.id)
+        }
+        log(`agent gone id=${id}${entry.tenant ? ` tenant=${entry.tenant.id}` : ''}`)
+        tenantStore?.saveIfDirty()
       }
     })
   })
@@ -483,14 +609,149 @@ function startAgentListener(args, tls) {
 }
 
 // ---------------------------------------------------------------------------
+// Tenant CLI (runs before any listener starts)
+// ---------------------------------------------------------------------------
+
+function runTenantCli(argv) {
+  let dataDir = path.join(os.homedir(), '.dsh-relay')
+  let quotaDefault = DEFAULT_QUOTA_BYTES
+  const rest = []
+  for (let i = 0; i < argv.length; i += 1) {
+    const a = argv[i]
+    if (a === '--data-dir') {
+      if (i + 1 >= argv.length) fail('missing value for --data-dir')
+      dataDir = argv[i + 1]
+      i += 1
+    } else if (a === '--quota-default') {
+      if (i + 1 >= argv.length) fail('missing value for --quota-default')
+      const parsed = parseQuota(argv[i + 1])
+      if (!parsed) fail('bad --quota-default (use e.g. 100MB)')
+      quotaDefault = parsed
+      i += 1
+    } else {
+      rest.push(a)
+    }
+  }
+
+  const [sub, ...tail] = rest
+  const flags = {}
+  const positional = []
+  for (let i = 0; i < tail.length; i += 1) {
+    if (tail[i].startsWith('--')) {
+      const name = tail[i].slice(2)
+      const value = tail[i + 1] !== undefined && !tail[i + 1].startsWith('--') ? tail[(i += 1)] : 'true'
+      flags[name] = value
+    } else {
+      positional.push(tail[i])
+    }
+  }
+
+  const store = new TenantStore(path.join(dataDir, 'tenants.json'), { quotaDefault })
+
+  const printList = () => {
+    const rows = store.list()
+    if (!rows.length) {
+      console.log('no tenants. Create one with: dsh-relay-server tenant add --name <name>')
+      return
+    }
+    console.log(['name', 'status', 'today', 'quota', 'last seen', 'key id'].join('\t'))
+    for (const tenant of rows) {
+      const used = tenant.day === quotaDayNow() ? tenant.usedBytesDay : 0
+      console.log([
+        tenant.id,
+        tenant.status,
+        `${formatBytes(used)}${tenant.day === quotaDayNow() ? '' : ' (new day)'}`,
+        tenant.quotaBytesDay > 0 ? formatBytes(tenant.quotaBytesDay) : 'unlimited',
+        tenant.lastSeenAt ?? 'never',
+        tenant.keyId,
+      ].join('\t'))
+    }
+  }
+
+  switch (sub) {
+    case undefined:
+    case 'list': {
+      printList()
+      return
+    }
+    case 'add': {
+      const name = flags.name ?? positional[0]
+      if (!name) fail('tenant add needs --name <name>')
+      let quota = quotaDefault
+      if (flags.quota !== undefined) {
+        const parsed = parseQuota(flags.quota)
+        if (!parsed) fail('bad --quota (use e.g. 100MB)')
+        quota = parsed
+      }
+      const { tenant, key } = store.add({ name, quotaBytesDay: quota, note: flags.note ?? '' })
+      console.log(`tenant ${tenant.id} created`)
+      console.log(`  quota:  ${tenant.quotaBytesDay > 0 ? formatBytes(tenant.quotaBytesDay) : 'unlimited'} per day`)
+      console.log(`  key id: ${tenant.keyId}`)
+      console.log('')
+      console.log('  relay key (shown once, store it in the DSH panel):')
+      console.log(`  ${key}`)
+      console.log('')
+      return
+    }
+    case 'show': {
+      const tenant = store.resolve(flags.name ?? positional[0])
+      if (!tenant) fail(`no tenant ${flags.name ?? positional[0]}`)
+      const used = tenant.day === quotaDayNow() ? tenant.usedBytesDay : 0
+      console.log(JSON.stringify({ ...tenant, usedToday: used, today: quotaDayNow() }, null, 2))
+      return
+    }
+    case 'disable':
+    case 'enable': {
+      const tenant = store.setStatus(flags.name ?? positional[0], sub === 'disable' ? 'disabled' : 'active')
+      console.log(`tenant ${tenant.id} is now ${tenant.status}`)
+      console.log('takes effect on the next agent reconnect; existing connections keep running until then')
+      return
+    }
+    case 'reset': {
+      const tenant = store.reset(flags.name ?? positional[0])
+      console.log(`tenant ${tenant.id}: today's usage reset to 0 (${formatBytes(tenant.quotaBytesDay)} quota)`)
+      return
+    }
+    case 'remove': {
+      const tenant = store.remove(flags.name ?? positional[0])
+      console.log(`tenant ${tenant.id} removed`)
+      return
+    }
+    default:
+      fail(`unknown tenant command ${sub}. Try: add, list, show, disable, enable, reset, remove`)
+  }
+}
+
+function quotaDayNow() {
+  return new Date().toISOString().slice(0, 10)
+}
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 
+if (process.argv[2] === 'tenant') {
+  runTenantCli(process.argv.slice(3))
+  process.exit(0)
+}
+
 const args = parseArgs(process.argv)
+tenantStore = new TenantStore(path.join(args.dataDir, 'tenants.json'), { quotaDefault: args.quotaDefault })
 const tls = ensureSelfSignedCert(args)
 startPhoneListener(args)
 startAgentListener(args, tls)
-log(`dsh-relay-server ${VERSION} ready (key gate: ON)`)
+const tenantCount = tenantStore.list().length
+log(`dsh-relay-server ${VERSION} ready (${tenantCount} tenant${tenantCount === 1 ? '' : 's'}${args.key ? ' + admin key' : ''})`)
+if (!tenantCount && !args.key) {
+  log('warning: no tenants and no --key — nobody can register. Try: dsh-relay-server tenant add --name <name>')
+}
 
-process.on('SIGINT', () => process.exit(0))
-process.on('SIGTERM', () => process.exit(0))
+const saveTimer = setInterval(() => tenantStore.saveIfDirty(), 15000)
+saveTimer.unref?.()
+
+const shutdown = () => {
+  tenantStore.saveIfDirty()
+  process.exit(0)
+}
+process.on('SIGINT', shutdown)
+process.on('SIGTERM', shutdown)

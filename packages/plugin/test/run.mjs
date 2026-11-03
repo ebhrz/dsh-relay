@@ -17,6 +17,7 @@ const SUITE = [
   'mobile-patch.test.mjs',
   'mobile-bridge.test.mjs',
   'mobile-transport.test.mjs',
+  'mobile-terminal.test.mjs',
 ]
 
 const failures = []

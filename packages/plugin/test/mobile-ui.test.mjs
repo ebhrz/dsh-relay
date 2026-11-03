@@ -479,7 +479,12 @@ try {
       document.getElementById('terminalSend').click()
     })()
   `)
-  await sleep(400)
+  // The host answers later polls with only the new lines; the page must append
+  // them instead of replacing the buffer.
+  await waitFor('document.getElementById("terminalOut").textContent.includes("appended-by-poll")', 'terminal appends the delta', 8000)
+  assert(await evaluate('(document.getElementById("terminalOut").textContent.match(/mock bash — terminal output/g) || []).length === 1'), 'terminal snapshot appears only once')
+  assert(await evaluate('document.getElementById("terminalOut").textContent.includes("echo hello")'), 'terminal keeps the earlier output after appending')
+  await sleep(300)
   await screenshot('14-terminal.png')
   await evaluate('document.getElementById("terminalBack").click()')
   await waitFor('document.getElementById("terminalPanel").hidden === true', 'terminal closed')

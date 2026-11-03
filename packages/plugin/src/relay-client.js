@@ -12,6 +12,16 @@ import { auditLog } from './identity.js'
 const CONNECT_TIMEOUT = 15000
 const HEARTBEAT_INTERVAL = 20000
 
+// Reasons a multi-tenant relay can reject a registration, in words the panel
+// and the phone can show without translation.
+const REJECT_TEXT = {
+  'quota-exceeded': '今日流量已用完，明天 0 点恢复',
+  'key-disabled': '这个 relay 密钥已被停用',
+  'unknown-key': 'relay 不认识这个密钥（可能已失效）',
+  'replaced': '同样的密钥在另一处接入，这一条被中继断开',
+  'bad key proof': '密钥不正确',
+}
+
 export class RelayClient extends EventTarget {
   constructor(options) {
     super()
@@ -140,7 +150,15 @@ export class RelayClient extends EventTarget {
       }, HEARTBEAT_INTERVAL)
       ws.on('pong', () => { this.pongMisses = 0 })
 
-      ws.send(JSON.stringify({ t: 'hello', v: 1, id: this.identity.id, gate: this.identity.gate }))
+      // keyId lets a multi-tenant relay find the tenant without being told the
+      // key: it is the same hash both sides derive, so nothing new to configure.
+      ws.send(JSON.stringify({
+        t: 'hello',
+        v: 1,
+        id: this.identity.id,
+        gate: this.identity.gate,
+        keyId: crypto.createHash('sha256').update(String(this.relayKey)).digest('hex').slice(0, 12),
+      }))
     })
 
     ws.on('message', (data, isBinary) => {
@@ -155,11 +173,18 @@ export class RelayClient extends EventTarget {
         }
         if (msg.t === 'registered') {
           this.backoff = 1000
+          this.backoffCap = 30000
           this.emitStatus('connected', url)
           return
         }
         if (msg.t === 'rejected') {
-          this.emitStatus('rejected', msg.reason ?? 'rejected by relay')
+          const reason = String(msg.reason ?? 'rejected by relay')
+          this.emitStatus('rejected', REJECT_TEXT[reason] ?? reason)
+          // Retrying fast cannot fix these: back off hard so a suspended or
+          // exhausted key does not hammer the relay all day.
+          if (reason === 'quota-exceeded') this.slowDown(5 * 60 * 1000)
+          else if (reason === 'key-disabled' || reason === 'unknown-key') this.slowDown(15 * 60 * 1000)
+          else if (reason === 'replaced') this.slowDown(60 * 1000)
           return
         }
         if (msg.t === 'close' && typeof msg.sid === 'number') {
@@ -184,9 +209,16 @@ export class RelayClient extends EventTarget {
   scheduleReconnect(detail) {
     if (this.stopped) return
     this.emitStatus('reconnecting', detail)
-    const delay = Math.min(30000, this.backoff) * (0.75 + Math.random() * 0.5)
-    this.backoff = Math.min(30000, this.backoff * 2)
+    const cap = this.backoffCap ?? 30000
+    const delay = Math.min(cap, this.backoff) * (0.75 + Math.random() * 0.5)
+    this.backoff = Math.min(cap, this.backoff * 2)
     this.reconnectTimer = setTimeout(() => this.connect(), delay)
+  }
+
+  /** Widen the retry window after a rejection that retrying cannot fix. */
+  slowDown(delayMs) {
+    this.backoffCap = delayMs
+    this.backoff = Math.max(this.backoff, delayMs)
   }
 
   // -- data -----------------------------------------------------------------

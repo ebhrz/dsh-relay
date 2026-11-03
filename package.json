@@ -1,6 +1,6 @@
 {
   "name": "dsh-relay",
-  "version": "0.11.0",
+  "version": "0.11.1",
   "private": true,
   "description": "Phone-first remote control for a local DeepSeek Harness, routed through your own zero-knowledge relay.",
   "license": "Apache-2.0",
@@ -12,7 +12,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "test": "npm run test --workspace dsh-relay-phone",
+    "test": "npm run test --workspace dsh-relay-phone && npm run test --workspace dsh-relay-server",
     "test:ui": "npm run test:ui --workspace dsh-relay-phone",
     "check": "npm run check --workspaces --if-present",
     "dev:mock": "npm run dev:mock --workspace dsh-relay-phone",

@@ -72,6 +72,7 @@
       polling: false,
       timer: null,
       busy: false,
+      text: '', // everything received so far; the host only sends new lines
     },
   }
 
@@ -2597,7 +2598,8 @@
     $('terminalTitle').textContent = '终端'
     try {
       await ensureTerminal()
-      await refreshTerminal()
+      state.terminal.text = ''
+      await refreshTerminal(true)
       startTerminalPoll()
     } catch (error) {
       $('terminalOut').textContent = '终端不可用：' + (error.message || error)
@@ -2607,6 +2609,7 @@
   function closeTerminal() {
     $('terminalPanel').hidden = true
     state.terminal.open = false
+    state.terminal.text = ''
     stopTerminalPoll()
   }
 
@@ -2660,15 +2663,22 @@
       .replace(/\u001b(\[[0-9;?]*)?$/g, '')
   }
 
-  async function refreshTerminal() {
+  async function refreshTerminal(reset) {
     if (!state.terminal.id || !state.terminal.open) return
     var result = await rpc('terminal.read', {
       sessionId: state.currentId,
       terminalId: state.terminal.id,
       count: 300,
+      reset: reset === true,
     })
     var out = $('terminalOut')
-    var text = plainTerminalText(result.text) || '(无输出)'
+    // The bridge sends only the lines this phone has not seen; append them,
+    // and replace the buffer whenever it says the gap cannot be bridged.
+    var chunk = plainTerminalText(result.text)
+    if (result.appended !== true) state.terminal.text = chunk
+    else if (chunk) state.terminal.text = (state.terminal.text || '') + (state.terminal.text ? '\n' : '') + chunk
+    if (state.terminal.text.length > 200000) state.terminal.text = state.terminal.text.slice(-200000)
+    var text = state.terminal.text || '(无输出)'
     if (out.textContent !== text) {
       out.textContent = text
       out.scrollTop = out.scrollHeight
@@ -2714,12 +2724,13 @@
       var created = await rpc('terminal.create', { sessionId: state.currentId })
       state.terminal.id = created.id
       state.terminal.name = created.name || created.type
-      $('terminalOut').textContent = created.motd || ''
+      state.terminal.text = plainTerminalText(created.motd)
+      $('terminalOut').textContent = state.terminal.text || ''
       toast('已新建终端')
     } catch (error) {
       toast('新建终端失败：' + (error.message || error))
     }
-    refreshTerminal().catch(function () {})
+    refreshTerminal(true).catch(function () {})
   }
 
   async function terminalKill() {

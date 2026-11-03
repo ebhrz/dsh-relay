@@ -99,6 +99,7 @@ export function createMockBridge() {
     }]],
   ])
   let subscription = null
+  let terminalReads = 0
   let running = { 'session-a': true, 'session-b': false }
   // Mirrors the host's folded `permissions` projection, per session.
   const permissionState = new Map([
@@ -333,17 +334,31 @@ export function createMockBridge() {
           return { terminals: [], backends: ['bash'] }
         case 'terminal.create':
           return { id: 'term-1', name: 'bash', type: 'bash', pid: 4242, status: 'running', motd: 'mock bash — 输入命令试试（这里不会真的执行）\n$ ' }
-        case 'terminal.read':
+        case 'terminal.read': {
           // Real shells emit VT control sequences; the page has to strip them
-          // because it renders into a plain <pre>.
-          return {
-            text: '\u001b[1t\u001b[?1004h\u001b[?7l mock bash — terminal output\u001b[?7h\r\n'
-              + '$ echo hello\r\nhello\r\n\u001b[4;22H$ \u001b]9001;CmdNotFound;ls\u0007',
-            totalLines: 4,
-            lineBegin: 0,
-            lineEnd: 4,
-            truncated: false,
+          // because it renders into a plain <pre>. The reply also mimics the
+          // bridge's delta mode: the first read is a full snapshot, later ones
+          // carry only new lines (`appended: true`).
+          terminalReads += 1
+          if (params?.reset === true) terminalReads = 1
+          if (terminalReads === 1) {
+            return {
+              text: '\u001b[1t\u001b[?1004h\u001b[?7l mock bash — terminal output\u001b[?7h\r\n'
+                + '$ echo hello\r\nhello\r\n\u001b[4;22H$ \u001b]9001;CmdNotFound;ls\u0007',
+              totalLines: 4,
+              lineBegin: 0,
+              lineEnd: 4,
+              truncated: false,
+              appended: false,
+            }
           }
+          if (terminalReads === 2) {
+            return {
+              text: '$ tail -n 1\nappended-by-poll', totalLines: 6, lineBegin: 4, lineEnd: 6, truncated: false, appended: true,
+            }
+          }
+          return { text: '', totalLines: 6, lineBegin: 4, lineEnd: 6, truncated: false, appended: true }
+        }
         case 'terminal.send':
           return { delta: '', pending: false, waitReason: 'idle', sessionStatus: 'running', truncated: false }
         case 'terminal.cancel':
