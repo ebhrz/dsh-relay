@@ -95,9 +95,10 @@ export class TenantStore {
    * running. Objects are merged in place because live connections hold a
    * reference to their tenant; replacing the map would orphan them.
    */
-  reloadIfChanged() {
+  reloadIfChanged(force = false) {
     const mtimeMs = this.statMtime()
-    if (!mtimeMs || mtimeMs === this.mtimeMs) return false
+    if (!mtimeMs) return false
+    if (!force && mtimeMs === this.mtimeMs) return false
     this.mtimeMs = mtimeMs
     let raw
     try {

@@ -5,7 +5,7 @@
 // Real ports and a real self-signed cert, but nothing leaves 127.0.0.1.
 
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import net from 'node:net'
@@ -207,6 +207,30 @@ try {
   await waitFor(async () => messages3.find((m) => m.t === 'rejected'), 'blocked registration')
   assert.equal(messages3.find((m) => m.t === 'rejected').reason, 'quota-exceeded')
   ws3.close()
+
+  // ── a key created while the server runs works immediately ──────────
+  // The CLI writes the ledger and signals the running relay (SIGHUP), so the
+  // 15-second watcher is not the only thing that can pick it up.
+  const cliOut = execFileSync(process.execPath, [
+    relayPath, 'tenant', 'add', '--name', 'liveadd', '--quota', '5MB', '--max-streams', '3', '--data-dir', dir,
+  ], { encoding: 'utf8' })
+  const liveKey = cliOut.split('\n').map((line) => line.trim()).find((line) => /^[0-9a-f]{48}$/.test(line))
+  assert.ok(liveKey, 'the CLI printed a key')
+
+  const ws5 = new WebSocket(`wss://127.0.0.1:${agentPort}/agent`, { rejectUnauthorized: false })
+  const messages5 = []
+  ws5.on('message', (data, isBinary) => { if (!isBinary) messages5.push(JSON.parse(data.toString())) })
+  await new Promise((resolve, reject) => {
+    ws5.once('open', resolve)
+    ws5.once('error', reject)
+  })
+  ws5.send(JSON.stringify({ t: 'hello', v: 1, id: 'LIVEADD1', gate: GATE, keyId: keyIdFor(liveKey) }))
+  const challenge5 = await waitFor(async () => messages5.find((m) => m.t === 'challenge'), 'challenge for the live-added key', 5000)
+  const proof5 = crypto.createHmac('sha256', secretFor(liveKey)).update(`${challenge5.nonce}|LIVEADD1`).digest('hex')
+  ws5.send(JSON.stringify({ t: 'register', proof: proof5 }))
+  await waitFor(async () => messages5.find((m) => m.t === 'registered' || m.t === 'rejected'), 'live-added key registers', 5000)
+  assert.ok(messages5.some((m) => m.t === 'registered'), `a key added while running is usable at once: ${JSON.stringify(messages5)}`)
+  ws5.close()
 
   // ── an unknown key is refused ───────────────────────────────────────
   const ws4 = new WebSocket(`wss://127.0.0.1:${agentPort}/agent`, { rejectUnauthorized: false })

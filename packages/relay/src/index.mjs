@@ -505,6 +505,9 @@ function startAgentListener(args, tls) {
         try { msg = JSON.parse(data.toString()) } catch { return failConn('bad json') }
 
         if (msg.t === 'hello') {
+          // A key may have been created a moment ago by the CLI; pick it up now
+          // rather than making the first connection attempt wait for the timer.
+          tenantStore?.reloadIfChanged()
           id = String(msg.id ?? '')
           if (!/^[A-Za-z0-9]{4,16}$/.test(id)) return failConn('bad id')
           if (typeof msg.gate !== 'string' || !/^[a-f0-9]{16,128}$/.test(msg.gate)) {
@@ -814,11 +817,16 @@ if (!tenantCount && !args.key) {
   log('warning: no tenants and no --key — nobody can register. Try: dsh-relay-server tenant add --name <name>')
 }
 
+// One `stat` per second so a key created by the CLI works on the next attempt.
+// (A signal would be cheaper but SIGHUP does not exist on Windows, and this box
+// and the operator's machine are not always the same platform.)
+//
+// Reload BEFORE saving: the CLI writes the same file, and saving first would
+// overwrite a key that was just added with our older in-memory copy.
 const saveTimer = setInterval(() => {
+  if (tenantStore.reloadIfChanged()) log(`tenants reloaded: ${tenantStore.list().length} tenant(s)`)
   tenantStore.saveIfDirty()
-  // Picks up `tenant add/disable/reset` run while the server keeps running.
-  tenantStore.reloadIfChanged()
-}, 15000)
+}, 1000)
 saveTimer.unref?.()
 
 const shutdown = () => {
