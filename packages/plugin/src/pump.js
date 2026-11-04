@@ -59,6 +59,8 @@ export class PumpManager {
       protocol: 'http:',
     }))
     this.resolveAuthCookie = options.resolveAuthCookie ?? (() => null)
+    // Root token for DSH 0.2's index exchange; null on older hosts.
+    this.resolveIndexToken = options.resolveIndexToken ?? (() => null)
     this.pairing = options.pairing // PairingService
     this.cryptoBox = options.cryptoBox
     this.client = options.client
@@ -641,7 +643,21 @@ export class PumpManager {
     // Any inbound copy was dropped in the loop above, so a client cannot forge it.
     rewritten.push('x-dsh-relay: 1')
     if (authCookie) rewritten.push(`Cookie: ${authCookie}`)
-    const out = `${lines[0]}\r\n${rewritten.join('\r\n')}\r\n\r\n`
+
+    // DSH 0.2 guards the index exchange with a root token, and the pump already
+    // uses that token to mint the API cookie. A browser arriving through the
+    // relay has no token of its own, so the desktop shell it received came back
+    // unauthenticated even though every later API call would have worked.
+    let requestLine = lines[0]
+    if (stream.relay && isDocument && !isUpgrade && info.path === '/') {
+      const token = this.resolveIndexToken()
+      if (token) {
+        const query = new URLSearchParams(info.query)
+        query.set('token', token)
+        requestLine = `${info.method} /?${query.toString()} ${info.version}`
+      }
+    }
+    const out = `${requestLine}\r\n${rewritten.join('\r\n')}\r\n\r\n`
 
     if (isUpgrade) {
       const upstream = net.connect({ host: target.host, port: target.port })
