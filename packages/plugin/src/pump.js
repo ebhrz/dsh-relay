@@ -365,6 +365,17 @@ export class PumpManager {
       return
     }
 
+    // The plugin's own console is a desktop tool: it prints the pairing URL
+    // (which carries the device PSK) and can change the relay key. A phone that
+    // reached it would be able to pair unlimited extra devices, so relayed
+    // requests never see it, ticketed or not.
+    if (stream.relay && info.path.startsWith('/relay-bridge/')) {
+      auditLog(`relayed request to the management panel blocked: ${info.path}`)
+      this.respondInline(sid, 403, 'Forbidden', 'dsh-relay-phone: the management panel is desktop-only\n')
+      this.closeStream(sid)
+      return
+    }
+
     if (!session) {
       auditLog(`unauthenticated ${info.method} ${info.path} -> pairing page`)
       this.respond(sid, 200, 'text/html; charset=utf-8',
@@ -530,10 +541,12 @@ export class PumpManager {
       if (lower.startsWith('connection:')) continue
       if (lower.startsWith('accept-encoding:')) continue
       if (lower.startsWith('x-relay-enc:') || lower.startsWith('x-relay-ct:')) continue
+      if (lower.startsWith('x-dsh-relay:')) continue // the pump sets its own
       headers.push(line)
     }
     headers.unshift(`Host: ${target.authority}`)
     headers.unshift(`Origin: ${target.origin}`)
+    headers.push('x-dsh-relay: 1')
     if (authCookie) headers.push(`Cookie: ${authCookie}`)
     headers.push(`Content-Type: ${info.headers.get('x-relay-ct') ?? 'text/plain;charset=UTF-8'}`)
     headers.push(`Content-Length: ${plain.length}`)
@@ -603,6 +616,8 @@ export class PumpManager {
         hasHost = true
       } else if (/^origin:/i.test(line)) {
         rewritten.push(`Origin: ${target.origin}`)
+      } else if (/^x-dsh-relay:/i.test(line)) {
+        // Dropped: the pump adds its own marker below.
       } else if (/^cookie:/i.test(line)) {
         // The phone's relay ticket authenticates it to the pump, not to DSH;
         // upstream speaks the browser-session credential instead.
@@ -621,6 +636,10 @@ export class PumpManager {
     }
     if (!hasHost) rewritten.unshift(`Host: ${target.authority}`)
     if (!isUpgrade && !hasConnection) rewritten.push('Connection: close')
+    // Mark the request as relayed. The plugin's own console uses this to refuse
+    // phone-side access: it hands out pairing links, which embed the device PSK.
+    // Any inbound copy was dropped in the loop above, so a client cannot forge it.
+    rewritten.push('x-dsh-relay: 1')
     if (authCookie) rewritten.push(`Cookie: ${authCookie}`)
     const out = `${lines[0]}\r\n${rewritten.join('\r\n')}\r\n\r\n`
 

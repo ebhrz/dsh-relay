@@ -61,6 +61,7 @@ The bridge dials **out** to the relay, so your machine needs no public port and 
 | Confidentiality | Every API request/response body and WebSocket frame is sealed with a key derived from the PSK (`tweetnacl` secretbox) |
 | Relay ↔ desktop | Self-signed TLS with certificate pinning on first use (TOFU); if the fingerprint ever changes, the channel halts instead of reconnecting blindly |
 | Revocation | "Regenerate" in the panel rotates the PSK, which invalidates every paired phone at once |
+| Management console | `/relay-bridge/panel` and `/relay-bridge/api` are desktop-only: they print the pairing URL, which carries the PSK. The pump marks relayed requests, so a phone reaching the desktop UI still cannot open the panel |
 
 **What the relay can see:** device ids, gates, connection metadata, request sizes and timing, and client IPs. Not your prompts, tool output, or file contents.
 

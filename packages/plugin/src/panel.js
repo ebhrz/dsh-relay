@@ -89,9 +89,17 @@ export async function registerPanel(ctx, service) {
     kind: 'exact',
     path: '/relay-bridge/panel',
     handler: async (req, res) => {
-      // Same ticket policy as /relay-bridge/api: relayed requests already
-      // carry a ticket; a local page load mints one so its write actions
-      // authenticate.
+      // Desktop-only. This page hands out the pairing entry URL, which embeds
+      // the device PSK (`#k=`); a relayed request is a phone, and a phone that
+      // could read it would be able to pair unlimited extra devices. The pump
+      // marks relayed requests, so this cannot be forged by the client.
+      if (req.headers['x-dsh-relay']) {
+        res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' })
+        res.end('dsh-relay: the management panel is desktop-only. Open it on 127.0.0.1.\n')
+        return
+      }
+      // Same ticket policy as /relay-bridge/api: a local page load mints one so
+      // its write actions authenticate.
       if (!service.pairing.sessionForHeaders(req.headers)) {
         if (!isLoopback(req.socket?.remoteAddress ?? '')) {
           res.writeHead(401, { 'content-type': 'text/plain; charset=utf-8' })
@@ -115,6 +123,13 @@ export async function registerPanel(ctx, service) {
       const reply = (code, value) => {
         res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
         res.end(JSON.stringify(value))
+      }
+
+      // Desktop-only, for the same reason as the page: the snapshot contains
+      // the pairing URL with the device PSK, and the relay key can be changed
+      // from here.
+      if (req.headers['x-dsh-relay']) {
+        return reply(403, { ok: false, error: 'desktop-only' })
       }
 
       // Pairing-ticket gate. Requests arriving through the relay already
