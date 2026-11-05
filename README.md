@@ -119,6 +119,12 @@ npx dsh-relay-server tenant disable alice
 
 `0` means unlimited for either limit. See [the relay README](packages/relay/README.md) for every flag and subcommand.
 
+**For a relay other people use, also set a brake.** `--egress-limit 2GB` is a process-wide daily cap that does not trust the per-tenant ledger: when the total crosses it, every connection is closed and the reason is logged. Pick a number you would be willing to pay for once, and a bug or a forgotten tenant cannot turn into a bandwidth bill:
+
+```sh
+npx dsh-relay-server --port 8889 --agent-port 9000 --egress-limit 2GB
+```
+
 **Single-user deployment.** Skip tenants entirely and keep one shared key; the admin path is never metered:
 
 ```sh

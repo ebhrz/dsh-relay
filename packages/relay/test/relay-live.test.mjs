@@ -157,7 +157,9 @@ try {
   // ── quota cutoff: refill the ledger, then push past the limit ───────
   const reloaded = new TenantStore(path.join(dir, 'tenants.json'))
   const t2 = reloaded.get('tester')
-  t2.usedBytesDay = QUOTA - 10
+  // Leave room for the request head (which is metered too) but not for a 4KB
+  // body, so the trip happens on the body rather than on the head.
+  t2.usedBytesDay = QUOTA - 2000
   reloaded.save()
 
   const ws2 = new WebSocket(`wss://127.0.0.1:${agentPort}/agent`, { rejectUnauthorized: false })
@@ -253,7 +255,134 @@ try {
   // (Relay restarted with --key in its own test would double the runtime; the
   // fallback path is covered by the register branch reading args.key.)
 
+  // ── the quota cuts a stream that is already running ─────────────────
+  // A tenant that is already connected must not be able to keep pushing bytes
+  // past the limit: the phone socket is destroyed the moment the counter trips.
+  const cliKey = (args) => {
+    const out = execFileSync(process.execPath, [relayPath, ...args, '--data-dir', dir], { encoding: 'utf8' })
+    return out.split('\n').map((line) => line.trim()).find((line) => /^[0-9a-f]{48}$/.test(line))
+  }
+  const connectAgent = async (id, tenantKey) => {
+    const socket = new WebSocket(`wss://127.0.0.1:${agentPort}/agent`, { rejectUnauthorized: false })
+    const control = []
+    const frames = []
+    socket.on('message', (data, isBinary) => { if (isBinary) frames.push(data); else control.push(JSON.parse(data.toString())) })
+    await new Promise((resolve, reject) => {
+      socket.once('open', resolve)
+      socket.once('error', reject)
+    })
+    const secret = secretFor(tenantKey)
+    socket.send(JSON.stringify({ t: 'hello', v: 1, id, gate: GATE, keyId: keyIdFor(tenantKey) }))
+    const challenge = await waitFor(async () => control.find((m) => m.t === 'challenge'), `challenge for ${id}`)
+    socket.send(JSON.stringify({ t: 'register', proof: crypto.createHmac('sha256', secret).update(`${challenge.nonce}|${id}`).digest('hex') }))
+    await waitFor(async () => control.some((m) => m.t === 'registered' || m.t === 'rejected'), `register ${id}`)
+    assert.ok(control.some((m) => m.t === 'registered'), `${id} registered: ${JSON.stringify(control)}`)
+    return { socket, control, frames }
+  }
+
+  const streamerKey = cliKey(['tenant', 'add', '--name', 'streamer', '--quota', '200KB', '--max-streams', '4'])
+  const streamer = await connectAgent('STREAM01', streamerKey)
+
+  const phoneSock = net.connect({ host: '127.0.0.1', port: phonePort })
+  phoneSock.on('error', () => {})
+  let phoneClosed = false
+  phoneSock.on('close', () => { phoneClosed = true })
+  await new Promise((resolve) => phoneSock.once('connect', resolve))
+  phoneSock.write(`POST /c/STREAM01/upload?g=${GATE} HTTP/1.1\r\nhost: x\r\ncontent-length: 262144\r\n\r\n`)
+  await waitFor(async () => streamer.frames.length >= 1, 'the first frame reaches the agent')
+
+  phoneSock.write(Buffer.alloc(100 * 1024, 0x41))
+  await new Promise((done) => setTimeout(done, 400))
+  assert.equal(phoneClosed, false, '100KB of a 200KB quota leaves the stream open')
+
+  phoneSock.write(Buffer.alloc(150 * 1024, 0x42))
+  await waitFor(async () => phoneClosed, 'the phone socket is destroyed once the quota trips', 8000)
+  const forwarded = streamer.frames.reduce((sum, frame) => sum + frame.length - 4, 0)
+  assert.ok(forwarded < 260 * 1024, `no bytes pass after the trip (agent saw ${forwarded})`)
+  const afterTrip = await waitFor(async () => streamer.control.find((m) => m.t === 'rejected'), 'agent told why')
+  assert.equal(afterTrip.reason, 'quota-exceeded')
+  streamer.socket.close()
+
+  // ── the agent -> phone direction is metered too ─────────────────────
+  const reverserKey = cliKey(['tenant', 'add', '--name', 'reverser', '--quota', '5MB', '--max-streams', '4'])
+  const reverser = await connectAgent('REVERSE1', reverserKey)
+  const downSock = net.connect({ host: '127.0.0.1', port: phonePort })
+  downSock.on('error', () => {})
+  const downBytes = []
+  downSock.on('data', (chunk) => downBytes.push(chunk))
+  await new Promise((resolve) => downSock.once('connect', resolve))
+  downSock.write(`GET /c/REVERSE1/download?g=${GATE} HTTP/1.1\r\nhost: x\r\n\r\n`)
+  await waitFor(async () => reverser.frames.length >= 1, 'download stream reaches the agent')
+  const downSid = reverser.frames[0].readUInt32BE(0)
+  reverser.socket.send(Buffer.concat([reverser.frames[0].subarray(0, 4), Buffer.alloc(64 * 1024, 0x43)]), { binary: true })
+  await waitFor(async () => downBytes.reduce((n, chunk) => n + chunk.length, 0) >= 64 * 1024, 'phone receives 64KB')
+  await new Promise((done) => setTimeout(done, 1200))
+  const ledgerAfter = JSON.parse(fs.readFileSync(path.join(dir, 'tenants.json'), 'utf8'))
+  const reverseUsage = ledgerAfter.tenants.find((item) => item.id === 'reverser').usedBytesDay
+  assert.ok(reverseUsage >= 64 * 1024, `agent -> phone bytes are counted (saw ${reverseUsage})`)
+  downSock.destroy()
+
+  // ── `tenant disable` stops a live connection, not just the next one ─
+  execFileSync(process.execPath, [relayPath, 'tenant', 'disable', 'reverser', '--data-dir', dir], { encoding: 'utf8' })
+  await waitFor(async () => reverser.socket.readyState === 3, 'a disabled tenant is disconnected within a second', 5000)
+  const disableMsg = reverser.control.find((m) => m.t === 'rejected')
+  assert.equal(disableMsg?.reason, 'key-disabled', `expected key-disabled, got ${JSON.stringify(reverser.control.slice(-2))}`)
+
+  // ── the process-wide egress brake ──────────────────────────────────
+  // Independent of the per-tenant ledger: even a tenant that is allowed more
+  // cannot push the whole relay past --egress-limit.
+  {
+    const brakeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-brake-'))
+    const brakePhone = await freePort()
+    const brakeAgent = await freePort()
+    const brakeKey = execFileSync(process.execPath, [
+      relayPath, 'tenant', 'add', '--name', 'brake', '--quota', '10MB', '--data-dir', brakeDir,
+    ], { encoding: 'utf8' }).split('\n').map((line) => line.trim()).find((line) => /^[0-9a-f]{48}$/.test(line))
+
+    const brakeChild = spawn(process.execPath, [
+      relayPath, '--port', brakePhone, '--agent-port', brakeAgent, '--host', '127.0.0.1', '--agent-host', '127.0.0.1',
+      '--data-dir', brakeDir, '--egress-limit', '300KB',
+    ], { stdio: ['ignore', 'pipe', 'pipe'] })
+    let brakeLog = ''
+    brakeChild.stdout.on('data', (chunk) => { brakeLog += chunk.toString() })
+    brakeChild.stderr.on('data', (chunk) => { brakeLog += chunk.toString() })
+
+    try {
+      await waitFor(async () => brakeLog.includes('ready'), 'brake relay ready', 20000)
+      const brakeWs = new WebSocket(`wss://127.0.0.1:${brakeAgent}/agent`, { rejectUnauthorized: false })
+      const brakeControl = []
+      const brakeFrames = []
+      brakeWs.on('message', (data, isBinary) => { if (isBinary) brakeFrames.push(data); else brakeControl.push(JSON.parse(data.toString())) })
+      await new Promise((resolve, reject) => {
+        brakeWs.once('open', resolve)
+        brakeWs.once('error', reject)
+      })
+      const brakeSecret = secretFor(brakeKey)
+      brakeWs.send(JSON.stringify({ t: 'hello', v: 1, id: 'BRAKE001', gate: GATE, keyId: keyIdFor(brakeKey) }))
+      const brakeChallenge = await waitFor(async () => brakeControl.find((m) => m.t === 'challenge'), 'brake challenge')
+      brakeWs.send(JSON.stringify({ t: 'register', proof: crypto.createHmac('sha256', brakeSecret).update(`${brakeChallenge.nonce}|BRAKE001`).digest('hex') }))
+      await waitFor(async () => brakeControl.find((m) => m.t === 'registered'), 'brake registered')
+
+      const brakeSock = net.connect({ host: '127.0.0.1', port: brakePhone })
+      brakeSock.on('error', () => {})
+      await new Promise((resolve) => brakeSock.once('connect', resolve))
+      brakeSock.write(`POST /c/BRAKE001/upload?g=${GATE} HTTP/1.1\r\nhost: x\r\ncontent-length: 500000\r\n\r\n`)
+      await waitFor(async () => brakeFrames.length >= 1, 'brake stream reaches the agent')
+      for (let i = 0; i < 5 && brakeWs.readyState === 1; i += 1) {
+        brakeSock.write(Buffer.alloc(100 * 1024, 0x44))
+        await new Promise((done) => setTimeout(done, 150))
+      }
+      await waitFor(async () => brakeWs.readyState === 3, 'the brake cuts every connection', 8000)
+      brakeSock.destroy()
+      assert.match(brakeLog, /egress limit reached/, `the brake must log why it cut: ${brakeLog.slice(-300)}`)
+    } finally {
+      try { brakeChild.kill() } catch {}
+      fs.rmSync(brakeDir, { recursive: true, force: true })
+    }
+  }
+
   console.log('ok: relay tenants, metering and quota cutoff')
+  console.log('ok: quota cuts a live stream, both directions are metered, disable and the egress brake stop traffic')
 } finally {
   stop()
   fs.rmSync(dir, { recursive: true, force: true })

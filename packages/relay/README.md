@@ -27,6 +27,7 @@ State lives in `--data-dir` (default `~/.dsh-relay`): the generated agent certif
 | `--key` | — | optional admin key (single-user mode; never metered) |
 | `--quota-default` | `100MB` | daily quota applied to tenants created without `--quota`; `0` = unlimited |
 | `--max-streams-default` | `32` | concurrent streams for tenants created without `--max-streams`; `0` = unlimited |
+| `--egress-limit` | `0` (off) | process-wide daily byte brake across **all** tenants; when reached, every connection is closed |
 | `--tls-cert` / `--tls-key` | auto | agent TLS material; a self-signed pair is generated into `--data-dir` on first run |
 | `--data-dir` | `~/.dsh-relay` | certificate plus ledger directory |
 | `--version` | — | print the version and exit |
@@ -86,6 +87,29 @@ Enforcement, in order:
    the agent gets `{t:'rejected', reason:'quota-exceeded'}` and the phone stream
    closes. It cannot re-register until the next day or a `tenant reset`.
 4. **Disabled keys** are refused at `hello`, before a challenge is issued.
+   `tenant disable` and `tenant remove` also drop the connection that is
+   already running, within a second — they mean "stop now", not "stop when the
+   phone reconnects".
+
+### Fail-safe for a hosted relay
+
+Per-tenant quotas are policy; `--egress-limit` is the brake that does not depend
+on the ledger being right. It counts every byte the process relays in either
+direction, resets at the UTC day boundary, and once the total crosses the limit
+it closes every connection and logs why:
+
+```sh
+dsh-relay-server --port 8889 --agent-port 9000 --egress-limit 2GB
+```
+
+A sensible value for a demo box is a few times the sum of the quotas you handed
+out. On a cloud host this is also what keeps a bug or a forgotten tenant from
+turning into a bandwidth bill: pick a number you are happy to pay for once, and
+the relay cannot exceed it in a day. `0`, the default, disables the brake — right
+for a personal relay where you are the only tenant.
+
+Every byte that crosses the relay is counted, including the request line and
+headers that arrive with the first packet of a request, in both directions.
 
 A single admin key can still be passed with `--key` (no quota, no tenant record)
 — convenient for a personal deployment that does not need metering. The plugin

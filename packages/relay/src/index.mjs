@@ -43,6 +43,7 @@ function parseArgs(argv) {
     key: process.env.DSH_RELAY_KEY ?? null,
     quotaDefault: DEFAULT_QUOTA_BYTES,
     maxStreamsDefault: DEFAULT_MAX_STREAMS,
+    egressLimit: 0, // 0 = no process-wide brake
     dataDir: path.join(os.homedir(), '.dsh-relay'),
     tlsCert: null,
     tlsKey: null,
@@ -72,6 +73,17 @@ function parseArgs(argv) {
         args.maxStreamsDefault = parsed
         break
       }
+      case '--egress-limit': {
+        const raw = next()
+        if (/^(0|off|unlimited)$/i.test(raw)) {
+          args.egressLimit = 0
+          break
+        }
+        const parsed = parseQuota(raw)
+        if (!parsed) fail('bad --egress-limit (use e.g. 2GB, or 0 to disable)')
+        args.egressLimit = parsed
+        break
+      }
       case '--data-dir': args.dataDir = next(); break
       case '--tls-cert': args.tlsCert = next(); break
       case '--tls-key': args.tlsKey = next(); break
@@ -99,6 +111,8 @@ function usage() {
   --key <secret>      admin registration key (optional; tenants are the normal path)
   --quota-default <n> daily quota for new tenants (default 100MB; 0 = unlimited)
   --max-streams-default <n> concurrent streams per tenant (default 32; 0 = unlimited)
+  --egress-limit <n>  process-wide daily byte brake across all tenants
+                      (default 0 = off; e.g. 2GB for a hosted demo)
   --tls-cert <pem>    custom TLS cert for the agent listener (default: auto
                       self-signed into --data-dir)
   --tls-key <pem>     custom TLS key for the agent listener
@@ -202,6 +216,27 @@ const tenantAgent = new Map() // tenant id -> { id, entry }
 let tenantStore = null // set in main()
 let nextSid = 1
 
+/**
+ * Process-wide egress fail-safe. Per-tenant quotas are the policy; this is the
+ * brake that does not depend on the ledger being right — if the whole process
+ * has pushed more than `--egress-limit` bytes today, everything is cut.
+ * 0 means unlimited (the default), which keeps a personal relay untouched.
+ */
+let egressDay = ''
+let egressBytes = 0
+
+function chargeEgress(bytes) {
+  if (!(bytes > 0)) return false
+  const day = quotaDayNow()
+  if (egressDay !== day) {
+    egressDay = day
+    egressBytes = 0
+  }
+  egressBytes += bytes
+  return args.egressLimit > 0 && egressBytes >= args.egressLimit
+}
+
+
 function allocSid() {
   const sid = nextSid
   nextSid = nextSid + 1
@@ -217,8 +252,13 @@ function closeEntry(entry, reason) {
     const phone = phoneByStream.get(sid)
     if (phone) phone.destroy(false)
   }
+  // Tell the agent why before the socket goes away. `terminate()` right after
+  // `send()` can drop the frame — the client would then retry without knowing
+  // it was cut for quota or because the key was disabled.
   try { entry.ws.send(JSON.stringify({ t: 'rejected', reason })) } catch {}
-  try { entry.ws.terminate() } catch {}
+  try { entry.ws.close() } catch {}
+  const kill = setTimeout(() => { try { entry.ws.terminate() } catch {} }, 500)
+  kill.unref?.()
 }
 
 /**
@@ -229,12 +269,22 @@ function charge(entry, bytes) {
   const tenant = entry?.tenant
   if (!tenant || !tenantStore || !(bytes > 0)) return
   const { over } = tenantStore.charge(tenant, bytes)
+  if (chargeEgress(bytes)) {
+    if (!egressTripped) {
+      egressTripped = true
+      log(`egress limit reached: ${formatBytes(egressBytes)} today >= ${formatBytes(args.egressLimit)}; closing every connection`)
+      for (const live of agents.values()) closeEntry(live, 'quota-exceeded')
+      tenantStore.saveIfDirty()
+    }
+  }
   if (!over || entry.quotaTripped) return
   entry.quotaTripped = true
   log(`quota exhausted tenant=${tenant.id} used=${formatBytes(tenant.usedBytesDay)} limit=${formatBytes(tenant.quotaBytesDay)}`)
   tenantStore.saveIfDirty()
   closeEntry(entry, 'quota-exceeded')
 }
+
+let egressTripped = false
 
 function sidPrefix(sid) {
   const b = Buffer.alloc(4)
@@ -273,8 +323,12 @@ class PhoneConn {
     socket.on('close', finish)
     socket.on('error', finish)
     // The rewritten request line (or the full buffered head for cookie-gate
-    // requests) and anything behind it go upstream.
-    sendStream(entry, sid, Buffer.isBuffer(firstLine) ? firstLine : Buffer.from(firstLine, 'latin1'))
+    // requests) and anything behind it go upstream. These bytes cross the relay
+    // too, so they are booked like every other frame.
+    const head = Buffer.isBuffer(firstLine) ? firstLine : Buffer.from(firstLine, 'latin1')
+    charge(entry, head.length + remainder.length)
+    if (this.closed) return
+    sendStream(entry, sid, head)
     if (remainder.length > 0) sendStream(entry, sid, remainder)
   }
 
@@ -830,6 +884,18 @@ if (!tenantCount && !args.key) {
 const saveTimer = setInterval(() => {
   if (tenantStore.reloadIfChanged()) log(`tenants reloaded: ${tenantStore.list().length} tenant(s)`)
   tenantStore.saveIfDirty()
+  // `tenant disable` and `tenant remove` mean "stop now", not "stop on the next
+  // reconnect": a connection that is already live would otherwise keep routing
+  // traffic (and burning the day's quota) until it happened to drop.
+  for (const entry of [...agents.values()]) {
+    const tenant = entry.tenant
+    if (!tenant) continue
+    const live = tenantStore.byKeyId(tenant.keyId)
+    if (!live || live.status !== 'active') {
+      log(`closing live agent tenant=${tenant.id} (${live ? 'disabled' : 'removed'})`)
+      closeEntry(entry, 'key-disabled')
+    }
+  }
 }, 1000)
 saveTimer.unref?.()
 

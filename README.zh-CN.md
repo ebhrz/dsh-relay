@@ -129,6 +129,14 @@ npx dsh-relay-server tenant disable alice
 
 两个上限都可以写 `0` 表示不限。完整参数和子命令见[中继的 README](packages/relay/README.md)。
 
+**要给别人用的中继，再加一道闸。** `--egress-limit 2GB` 是进程级的每日总字节上限，**不依赖租户账本**：
+总量一到就断开所有连接并记录原因。挑一个「就算付一次也无所谓」的数字，那么无论是代码 bug 还是
+忘了删的租户，都不会变成一张意外的带宽账单：
+
+```sh
+npx dsh-relay-server --port 8889 --agent-port 9000 --egress-limit 2GB
+```
+
 **单人部署**：完全不用租户，只留一把共享 key；admin 路径不计流量、不限并发：
 
 ```sh
