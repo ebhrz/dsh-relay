@@ -15,7 +15,7 @@ window.__ModuleLoader__.load({
   factory: (require) => {
     const React = require('react')
     const { createPortal } = require('react-dom')
-    const { useCallback, useEffect, useState } = React
+    const { useCallback, useEffect, useRef, useState } = React
     const h = React.createElement
     const Fragment = React.Fragment
 
@@ -34,6 +34,8 @@ window.__ModuleLoader__.load({
       statusIdle: '未连接',
       statusOpen: '已连接',
       close: '关闭',
+      remoteTitle: '远程无法使用',
+      remoteBody: '手机入口只在电脑上的 DSH 里可用。通过 relay 打开时，控制台不会把配对链接发出去——那串链接里带着设备密钥。请在电脑上打开这个面板。',
     }
     const en = {
       trigger: 'Phone Entry',
@@ -49,6 +51,8 @@ window.__ModuleLoader__.load({
       statusIdle: 'not connected',
       statusOpen: 'connected',
       close: 'Close',
+      remoteTitle: 'Not available remotely',
+      remoteBody: 'The phone entry only works from DSH on the host machine. Over the relay the console refuses to hand out the pairing link, because that link carries the device key. Open this panel on the computer instead.',
     }
 
     // The console (/relay-bridge/panel) is a standalone page on this same
@@ -107,6 +111,9 @@ window.__ModuleLoader__.load({
 .dsh-relay-qr-link{color:var(--r-chip);text-decoration:none}
 .dsh-relay-qr-link:hover{text-decoration:underline}
 .dsh-relay-qr-err{padding:8px 12px;font-size:11px;color:var(--r-err);background:var(--r-err-bg);border-top:1px solid var(--r-line);white-space:pre-wrap;width:100%;box-sizing:border-box;border-radius:0 0 14px 14px}
+.dsh-relay-qr-remote{display:flex;flex-direction:column;gap:6px;padding:4px 2px 2px}
+.dsh-relay-qr-remote-title{font-size:13px;font-weight:600;color:var(--r-fg)}
+.dsh-relay-qr-remote-body{font-size:12px;line-height:1.55;color:var(--r-muted)}
 `
       document.head.appendChild(style)
     }
@@ -155,6 +162,8 @@ window.__ModuleLoader__.load({
     function RelayPanelView({ onClose, t }) {
       const [snap, setSnap] = useState(null)
       const [error, setError] = useState('')
+      const [remote, setRemote] = useState(false)
+      const remoteRef = useRef(false)
       const [copied, setCopied] = useState(false)
       const [dark] = useState(hostIsDark)
 
@@ -162,9 +171,23 @@ window.__ModuleLoader__.load({
         // Every poll is a sealed round trip through the relay, so a hidden tab
         // has no reason to ask: phones keep this card open for a long time.
         if (typeof document !== 'undefined' && document.hidden) return
+        // Once refused, stop asking: a poll from a phone is a 403 over the
+        // relay every 15 seconds, and the answer will not change.
+        if (remoteRef.current) return
         try {
           const res = await fetch('/relay-bridge/api')
+          // Relayed requests are refused on purpose. Reporting that beats the
+          // raw parse error a JSON body would have produced here.
+          if (res.status === 403) {
+            remoteRef.current = true
+            setRemote(true)
+            setSnap(null)
+            setError('')
+            return
+          }
+          if (!res.ok) throw new Error(`HTTP ${res.status}`)
           const j = await res.json()
+          setRemote(false)
           setSnap(j)
           setError('')
         } catch (e) {
@@ -210,6 +233,7 @@ window.__ModuleLoader__.load({
       }
 
       const regenerate = async () => {
+        if (remote) return
         if (!window.confirm(t('regenerateConfirm'))) return
         try {
           const res = await fetch('/relay-bridge/api', {
@@ -217,6 +241,11 @@ window.__ModuleLoader__.load({
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({ action: 'regenerate' }),
           })
+          if (res.status === 403) {
+            setRemote(true)
+            setSnap(null)
+            return
+          }
           const j = await res.json()
           if (!j.ok) throw new Error(j.error || 'regenerate failed')
           setSnap(j.snapshot || snap)
@@ -236,14 +265,20 @@ window.__ModuleLoader__.load({
         h('div', { className: 'dsh-relay-qr-head' },
           h('span', { className: 'dsh-relay-qr-title' }, t('title')),
           h('span', { style: { flex: 1 } }),
-          h('span', { className: 'dsh-relay-qr-status' },
-            h('span', { className: `dsh-relay-qr-dot${connected ? ' on' : ''}` }),
-            connected ? t('statusOpen') : t('statusIdle')),
+          remote
+            ? null
+            : h('span', { className: 'dsh-relay-qr-status' },
+              h('span', { className: `dsh-relay-qr-dot${connected ? ' on' : ''}` }),
+              connected ? t('statusOpen') : t('statusIdle')),
           h('button', {
             type: 'button', className: 'dsh-relay-qr-close', 'aria-label': t('close'), onClick: onClose,
           }, '✕')),
         h('div', { className: 'dsh-relay-qr-body' },
-          !snap
+          remote
+            ? h('div', { className: 'dsh-relay-qr-remote' },
+              h('div', { className: 'dsh-relay-qr-remote-title' }, t('remoteTitle')),
+              h('div', { className: 'dsh-relay-qr-remote-body' }, t('remoteBody')))
+            : !snap
             ? h('div', { className: 'dsh-relay-qr-muted' }, t('loading'))
             : h(Fragment, null,
               entry && snap.qr
