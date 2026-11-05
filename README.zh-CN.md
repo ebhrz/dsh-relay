@@ -60,11 +60,13 @@ dsh-relay 把它拆成三块：
 | 层 | 机制 |
 |---|---|
 | 防中继被白嫖 | 中继以 `--key` 启动，agent 注册需 HMAC 挑战-应答证明 |
+| 每用户限额 | 每把租户 key 一个 agent 名额、一个并发 stream 上限（超了 `429`）、一个每日流量配额（到量即断） |
 | 防扫描打扰 | 手机 URL 携带 `?g=<gate>`（由 PSK 派生），中继校验通过才转发到你的机器 |
 | 手机↔电脑认证 | 二维码 fragment 携带 PSK，两步挑战-应答（防重放）换取密文 cookie，有效期 30 天 |
 | 数据机密性 | 由 PSK 派生信封密钥，所有 API 请求/响应体 + WS 帧用 tweetnacl secretbox 密封 |
 | 中继↔电脑 | 自签 TLS + 首次连接指纹钉住（TOFU）；指纹变化即拒绝连接，而不是盲目重连 |
 | 吊销 | 面板点「重新生成」= 轮换 PSK = 所有已配对手机立即失效 |
+| 管理面板 | `/relay-bridge/panel` 和 `/relay-bridge/api` 只在桌面可用：它们会打印带 PSK 的配对链接。pump 会给中转请求打标记，所以手机即使打开了桌面界面也拿不到面板 |
 
 **中继能看到什么**：设备 id、gate、连接元数据、请求大小与时间、客户端 IP。看不到你的提问、
 工具输出和文件内容。
@@ -87,11 +89,9 @@ dsh-relay 把它拆成三块：
 ```sh
 git clone https://github.com/ebhrz/dsh-relay.git
 cd dsh-relay
-npm install --workspace dsh-relay-server
+npm install
 
-# 记下这个 key：桥接端要填一样的值
-KEY="$(openssl rand -hex 24)"
-node packages/relay/src/index.mjs --port 8889 --agent-port 9000 --key "$KEY"
+node packages/relay/src/index.mjs --port 8889 --agent-port 9000 --data-dir ~/.dsh-relay
 ```
 
 开放**两个**端口：`8889` 给手机，`9000` 给 agent。要在手机侧终止 TLS，有两种方式：
@@ -101,7 +101,40 @@ node packages/relay/src/index.mjs --port 8889 --agent-port 9000 --key "$KEY"
 node packages/relay/src/tls-terminator.mjs --port 8443 --upstream 8889 --cert-dir /path/to/certs
 ```
 
-用 systemd / tmux / 你惯用的守护方式常驻即可；除了 `~/.dsh-relay` 里自动生成的 agent 证书，没有状态需要备份。
+用 systemd / tmux / 你惯用的守护方式常驻即可。状态只有自动生成的 agent 证书和
+`tenants.json`（只存 key 的哈希和当天用量）。
+
+不带 `--key`、也还没建租户时，中继会空转并提示。给每个人发一把自己的 key：
+
+```sh
+npx dsh-relay-server tenant add --name alice --quota 100MB --max-streams 32
+# → 只打印一次 alice 的 key，填进她 DSH 面板的 relay key 字段
+```
+
+每个租户按顺序受这些约束：
+
+1. **同时只有一个 agent** —— 同一个 key 再连一条，旧的会被踢掉。
+2. **并发 stream 上限**（`--max-streams-default`，默认 32）—— 超了手机侧收到 `429`。
+3. **每日流量配额**（`--quota-default`，默认 100MB，按 UTC 日）—— 到量即断，当天不能再注册，除非 `tenant reset`。
+4. **停用标记** —— 在 `hello` 阶段就拒绝，连挑战都不发。
+
+全部可以在**运行中**调整，不需要重启：
+
+```sh
+npx dsh-relay-server tenant list
+npx dsh-relay-server tenant set alice --quota 200MB --max-streams 64
+npx dsh-relay-server tenant set alice --max-streams 0        # 不限
+npx dsh-relay-server tenant disable alice
+```
+
+两个上限都可以写 `0` 表示不限。完整参数和子命令见[中继的 README](packages/relay/README.md)。
+
+**单人部署**：完全不用租户，只留一把共享 key；admin 路径不计流量、不限并发：
+
+```sh
+KEY="$(openssl rand -hex 24)"
+node packages/relay/src/index.mjs --port 8889 --agent-port 9000 --key "$KEY"
+```
 
 ### ② 本地桥接
 

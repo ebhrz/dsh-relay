@@ -97,21 +97,25 @@ function usage() {
   --agent-port <n>    WSS listener for agents (default port+1)
   --host <addr>       bind address (default 0.0.0.0)
   --key <secret>      admin registration key (optional; tenants are the normal path)
-  --quota-default <n> daily quota for new tenants (default 100MB)
+  --quota-default <n> daily quota for new tenants (default 100MB; 0 = unlimited)
   --max-streams-default <n> concurrent streams per tenant (default 32; 0 = unlimited)
   --tls-cert <pem>    custom TLS cert for the agent listener (default: auto
                       self-signed into --data-dir)
   --tls-key <pem>     custom TLS key for the agent listener
   --data-dir <dir>    state dir for the cert and the tenant ledger (default ~/.dsh-relay)
+  --version           print the version and exit
 
-Tenants (one key per user, each with a daily traffic quota):
+Tenants (one key per user, each with a daily quota and a stream cap):
 
-  dsh-relay-server tenant add --name <name> [--quota 100MB] [--note text]
+  dsh-relay-server tenant add --name <name> [--quota 100MB] [--max-streams 32] [--note text]
   dsh-relay-server tenant list
   dsh-relay-server tenant show <name>
+  dsh-relay-server tenant set <name> [--quota 200MB] [--max-streams 0]
   dsh-relay-server tenant disable <name> | enable <name>
   dsh-relay-server tenant reset <name>      (zero today's usage)
   dsh-relay-server tenant remove <name>
+
+  Changes apply to a running server immediately; 0 means unlimited for both limits.
 `
 }
 

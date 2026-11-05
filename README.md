@@ -56,6 +56,7 @@ The bridge dials **out** to the relay, so your machine needs no public port and 
 | Layer | Mechanism |
 |---|---|
 | Relay abuse | Server starts with `--key`; an agent must prove knowledge of it with an HMAC challenge-response before registering |
+| Per-user limits | Each tenant key has one agent slot, a concurrent-stream cap (`429` past it), and a daily byte quota that cuts the connection at the limit |
 | Scanner noise | Phone URLs carry `?g=<gate>`, derived from the device PSK; the relay drops requests without it before they reach your machine |
 | Phone ↔ desktop auth | The QR fragment carries the PSK; a two-step challenge-response (replay-resistant) exchanges it for an encrypted ticket cookie valid for 30 days |
 | Confidentiality | Every API request/response body and WebSocket frame is sealed with a key derived from the PSK (`tweetnacl` secretbox) |
@@ -80,13 +81,9 @@ Requirements: Node.js ≥ 22 where DSH runs, a machine with a public IP for the 
 ```sh
 git clone https://github.com/ebhrz/dsh-relay.git
 cd dsh-relay
-npm install --workspace dsh-relay-server
+npm install
 
-# one key per user, with a daily traffic quota (100MB unless you pass --quota)
-node packages/relay/src/index.mjs tenant add --name alice --quota 100MB
-# → prints alice's relay key once; that value goes into her DSH panel
-
-node packages/relay/src/index.mjs --port 8889 --agent-port 9000
+node packages/relay/src/index.mjs --port 8889 --agent-port 9000 --data-dir ~/.dsh-relay
 ```
 
 Open **two** ports: `8889` for phones and `9000` for agents. To terminate TLS in front of the phone port, either pass `--tls-cert/--tls-key` (the relay then speaks HTTPS/WSS directly) or run the included terminator behind a certificate you already have:
@@ -97,7 +94,32 @@ node packages/relay/src/tls-terminator.mjs --port 8443 --upstream 8889 --cert-di
 
 Run either process under systemd, `tmux`, or your supervisor of choice. State is the generated agent certificate plus `tenants.json` (keys as hashes, today's usage) in `~/.dsh-relay`.
 
-**Tenants are optional.** A single-user deployment can keep one shared `--key` and skip metering entirely:
+Started with no key and no tenants, the relay idles and says so. Give each person their own key (`npx dsh-relay-server …` works because the workspace is installed):
+
+```sh
+npx dsh-relay-server tenant add --name alice --quota 100MB --max-streams 32
+# → prints alice's key once; that value goes into her DSH panel
+```
+
+Per tenant the relay enforces, in this order:
+
+1. **One agent at a time** — a second agent with the same key replaces the first.
+2. **A concurrent-stream cap** (`--max-streams-default`, 32) — past it the phone gets `429`.
+3. **A daily byte quota** (`--quota-default`, 100MB, UTC day) — the connection is cut at the limit and refused until the next day or `tenant reset`.
+4. **A disabled flag** — refused at `hello`, before any challenge.
+
+All of it is adjustable on a running server, no restart:
+
+```sh
+npx dsh-relay-server tenant list
+npx dsh-relay-server tenant set alice --quota 200MB --max-streams 64
+npx dsh-relay-server tenant set alice --max-streams 0        # unlimited
+npx dsh-relay-server tenant disable alice
+```
+
+`0` means unlimited for either limit. See [the relay README](packages/relay/README.md) for every flag and subcommand.
+
+**Single-user deployment.** Skip tenants entirely and keep one shared key; the admin path is never metered:
 
 ```sh
 KEY="$(openssl rand -hex 24)"

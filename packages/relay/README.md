@@ -19,11 +19,23 @@ Two listeners:
 
 State lives in `--data-dir` (default `~/.dsh-relay`): the generated agent certificate and the tenant ledger.
 
+| Flag | Default | Meaning |
+|---|---|---|
+| `--port` | `8889` | HTTP listener for phones |
+| `--agent-port` | `port + 1` | WSS listener for agents |
+| `--host` | `0.0.0.0` | bind address for both listeners |
+| `--key` | — | optional admin key (single-user mode; never metered) |
+| `--quota-default` | `100MB` | daily quota applied to tenants created without `--quota`; `0` = unlimited |
+| `--max-streams-default` | `32` | concurrent streams for tenants created without `--max-streams`; `0` = unlimited |
+| `--tls-cert` / `--tls-key` | auto | agent TLS material; a self-signed pair is generated into `--data-dir` on first run |
+| `--data-dir` | `~/.dsh-relay` | certificate plus ledger directory |
+| `--version` | — | print the version and exit |
+
 ## Tenants (one key per user)
 
-Each user gets their own relay key, a daily traffic quota, and their own agent
-registration. Keys are stored as `sha256(key)` only — the plaintext key appears
-once, in the output of `tenant add`.
+Each user gets their own relay key, a daily traffic quota, a concurrent-stream
+cap, and their own agent registration. Keys are stored as `sha256(key)` only —
+the plaintext key appears once, in the output of `tenant add`.
 
 ```sh
 dsh-relay-server tenant add --name alice --quota 100MB --max-streams 32 --note "demo"
@@ -32,6 +44,7 @@ dsh-relay-server tenant add --name alice --quota 100MB --max-streams 32 --note "
 dsh-relay-server tenant list
 dsh-relay-server tenant set alice --quota 200MB --max-streams 16
 dsh-relay-server tenant set alice --max-streams 0        # unlimited
+dsh-relay-server tenant set alice --quota unlimited      # same, by name
 dsh-relay-server tenant disable alice     # kicked on next reconnect
 dsh-relay-server tenant enable alice
 dsh-relay-server tenant reset alice       # zero today's usage
@@ -40,6 +53,19 @@ dsh-relay-server tenant remove alice
 
 Both limits accept `0` for **unlimited**, which is how the owner usually runs
 their own machine — or just keep using the admin `--key`, which is never capped.
+
+**Changes apply immediately.** The server re-reads the ledger before every
+`hello` and once a second, so a key printed by `tenant add` works on the very
+next connection and a `disable` takes effect on the next reconnect. The running
+process keeps its own copy in memory; the file is the source of truth, and saves
+are merged rather than overwritten.
+
+`tenant list` prints one row per tenant:
+
+```
+name    status  today     quota      streams  last seen             key id
+alice   active  12.4 MB   100.0 MB   32       2026-11-06T01:20:04Z  6f1c2ab9d3e4
+```
 
 The agent sends a 12-character key id (the hash prefix) in `hello`, so the relay
 finds the tenant without ever seeing the key. Both sides derive the same HMAC
@@ -65,8 +91,8 @@ A single admin key can still be passed with `--key` (no quota, no tenant record)
 — convenient for a personal deployment that does not need metering. The plugin
 sends a key id either way; if it matches no tenant, the admin key is tried.
 
-Usage is written to `<data-dir>/tenants.json` every 15 seconds and when a
-connection closes, so a restart does not lose the day's ledger.
+Usage is written to `<data-dir>/tenants.json` within a second of changing and
+when a connection closes, so a restart does not lose the day's ledger.
 
 ## TLS for phones
 
