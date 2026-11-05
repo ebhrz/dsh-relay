@@ -120,7 +120,7 @@ Run either process under systemd, `tmux`, or your supervisor of choice. State is
 Started with no key and no tenants, the relay idles and says so. Give each person their own key (`npx dsh-relay-server …` works because the workspace is installed):
 
 ```sh
-npx dsh-relay-server tenant add --name alice --quota 100MB --max-streams 32
+npx dsh-relay-server tenant add --name alice --quota 50MB --max-streams 32
 # → prints alice's key once; that value goes into her DSH panel
 ```
 
@@ -128,7 +128,7 @@ Per tenant the relay enforces, in this order:
 
 1. **One agent at a time** — a second agent with the same key replaces the first.
 2. **A concurrent-stream cap** (`--max-streams-default`, 32) — past it the phone gets `429`.
-3. **A daily byte quota** (`--quota-default`, 100MB, UTC day) — the connection is cut at the limit and refused until the next day or `tenant reset`.
+3. **A daily byte quota** (`--quota-default`, 50MB, UTC day) — the connection is cut at the limit and refused until the next day or `tenant reset`.
 4. **A disabled flag** — refused at `hello`, before any challenge.
 
 All of it is adjustable on a running server, no restart:

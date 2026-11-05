@@ -11,7 +11,7 @@ import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 
-export const DEFAULT_QUOTA_BYTES = 100 * 1024 * 1024
+export const DEFAULT_QUOTA_BYTES = 50 * 1024 * 1024
 // A phone page holds a handful of connections at once (assets, API calls, the
 // mux WebSocket) and a browser may open six per origin; 32 leaves room for a
 // second tab without letting one tenant fill the process with sockets.

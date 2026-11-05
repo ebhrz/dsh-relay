@@ -25,7 +25,7 @@ State lives in `--data-dir` (default `~/.dsh-relay`): the generated agent certif
 | `--agent-port` | `port + 1` | WSS listener for agents |
 | `--host` | `0.0.0.0` | bind address for both listeners |
 | `--key` | — | optional admin key (single-user mode; never metered) |
-| `--quota-default` | `100MB` | daily quota applied to tenants created without `--quota`; `0` = unlimited |
+| `--quota-default` | `50MB` | daily quota applied to tenants created without `--quota`; `0` = unlimited |
 | `--max-streams-default` | `32` | concurrent streams for tenants created without `--max-streams`; `0` = unlimited |
 | `--egress-limit` | `0` (off) | process-wide daily byte brake across **all** tenants; when reached, every connection is closed |
 | `--tls-cert` / `--tls-key` | auto | agent TLS material; a self-signed pair is generated into `--data-dir` on first run |
@@ -39,7 +39,7 @@ cap, and their own agent registration. Keys are stored as `sha256(key)` only —
 the plaintext key appears once, in the output of `tenant add`.
 
 ```sh
-dsh-relay-server tenant add --name alice --quota 100MB --max-streams 32 --note "demo"
+dsh-relay-server tenant add --name alice --quota 50MB --max-streams 32 --note "demo"
 # → prints alice's key; paste it into the DSH panel's relay key field
 
 dsh-relay-server tenant list
@@ -82,7 +82,7 @@ Enforcement, in order:
    several (assets, API calls, the mux WebSocket). Past the limit the relay
    answers `429` with the current count, so a runaway client cannot fill the box
    with sockets.
-3. **Daily quota** (`--quota-default`, default 100MB, UTC day). Bytes are counted
+3. **Daily quota** (`--quota-default`, default 50MB, UTC day). Bytes are counted
    in both directions and the connection is cut the moment the limit is reached:
    the agent gets `{t:'rejected', reason:'quota-exceeded'}` and the phone stream
    closes. It cannot re-register until the next day or a `tenant reset`.

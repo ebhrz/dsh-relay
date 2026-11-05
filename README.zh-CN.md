@@ -130,7 +130,7 @@ node packages/relay/src/tls-terminator.mjs --port 8443 --upstream 8889 --cert-di
 不带 `--key`、也还没建租户时，中继会空转并提示。给每个人发一把自己的 key：
 
 ```sh
-npx dsh-relay-server tenant add --name alice --quota 100MB --max-streams 32
+npx dsh-relay-server tenant add --name alice --quota 50MB --max-streams 32
 # → 只打印一次 alice 的 key，填进她 DSH 面板的 relay key 字段
 ```
 
@@ -138,7 +138,7 @@ npx dsh-relay-server tenant add --name alice --quota 100MB --max-streams 32
 
 1. **同时只有一个 agent** —— 同一个 key 再连一条，旧的会被踢掉。
 2. **并发 stream 上限**（`--max-streams-default`，默认 32）—— 超了手机侧收到 `429`。
-3. **每日流量配额**（`--quota-default`，默认 100MB，按 UTC 日）—— 到量即断，当天不能再注册，除非 `tenant reset`。
+3. **每日流量配额**（`--quota-default`，默认 50MB，按 UTC 日）—— 到量即断，当天不能再注册，除非 `tenant reset`。
 4. **停用标记** —— 在 `hello` 阶段就拒绝，连挑战都不发。
 
 全部可以在**运行中**调整，不需要重启：

@@ -109,7 +109,7 @@ function usage() {
   --agent-port <n>    WSS listener for agents (default port+1)
   --host <addr>       bind address (default 0.0.0.0)
   --key <secret>      admin registration key (optional; tenants are the normal path)
-  --quota-default <n> daily quota for new tenants (default 100MB; 0 = unlimited)
+  --quota-default <n> daily quota for new tenants (default 50MB; 0 = unlimited)
   --max-streams-default <n> concurrent streams per tenant (default 32; 0 = unlimited)
   --egress-limit <n>  process-wide daily byte brake across all tenants
                       (default 0 = off; e.g. 2GB for a hosted demo)
