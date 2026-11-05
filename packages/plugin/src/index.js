@@ -165,23 +165,6 @@ export default class RelayBridgeService extends Service {
     }
   }
 
-  /**
-   * The root token DSH 0.2 wants on the index exchange. A browser that opens the
-   * desktop UI locally already has it in its URL; one arriving through the relay
-   * does not, which is why that shell used to come back unauthenticated.
-   */
-  upstreamIndexToken() {
-    const connection = this.ctx.get('connection')
-    if (!connection || typeof connection.authenticatedUrl !== 'function') return null
-    try {
-      const target = this.upstreamTarget()
-      const url = new URL(connection.authenticatedUrl(`${target.protocol}//${target.authority}/`))
-      return url.searchParams.get('token')
-    } catch {
-      return null
-    }
-  }
-
   mergeConfig(base, stored) {
     return {
       relayScheme: stored.relayScheme ?? base.relayScheme ?? 'http',
@@ -236,7 +219,6 @@ export default class RelayBridgeService extends Service {
       dshPort: this.config.dshPort,
       resolveTarget: () => this.upstreamTarget(),
       resolveAuthCookie: () => this.upstreamAuthCookie(),
-      resolveIndexToken: () => this.upstreamIndexToken(),
       pairing: this.pairing,
       cryptoBox: this.cryptoBox,
       mobile: this.mobile,
