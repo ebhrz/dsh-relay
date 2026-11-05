@@ -69,9 +69,10 @@ const request = (path, extra = '') => Buffer.from(
   // The ordinary DSH surface keeps working, and is marked as relayed.
   h.reset()
   h.pump.handleStreamData(23, request('/api/status'))
-  await waitFor(() => hits.length === 1)
+  // Wait for the forwarded response, not just for the upstream to be hit: those
+  // are separate events, and the gap is wide enough to flake on CI.
+  await waitFor(() => /200 OK/.test(h.text()))
   assert.deepEqual(hits, ['/api/status'])
-  assert.match(h.text(), /200 OK/)
 
   server.close()
   h.pump.handleStreamClose(23)

@@ -15,7 +15,8 @@ const HEARTBEAT_INTERVAL = 20000
 // Reasons a multi-tenant relay can reject a registration, in words the panel
 // and the phone can show without translation.
 const REJECT_TEXT = {
-  'quota-exceeded': '今日流量已用完，明天 0 点恢复',
+  'quota-exceeded': '今天这个密钥的流量额度已用完，UTC 0 点恢复',
+  'egress-limit': '中继今天的总流量额度已被用完，明天恢复',
   'key-disabled': '这个 relay 密钥已被停用',
   'unknown-key': 'relay 不认识这个密钥（可能已失效）',
   'replaced': '同样的密钥在另一处接入，这一条被中继断开',
@@ -182,7 +183,7 @@ export class RelayClient extends EventTarget {
           this.emitStatus('rejected', REJECT_TEXT[reason] ?? reason)
           // Retrying fast cannot fix these: back off hard so a suspended or
           // exhausted key does not hammer the relay all day.
-          if (reason === 'quota-exceeded') this.slowDown(5 * 60 * 1000)
+          if (reason === 'quota-exceeded' || reason === 'egress-limit') this.slowDown(5 * 60 * 1000)
           else if (reason === 'key-disabled' || reason === 'unknown-key') this.slowDown(15 * 60 * 1000)
           else if (reason === 'replaced') this.slowDown(60 * 1000)
           return

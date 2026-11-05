@@ -200,19 +200,28 @@ function ensureSelfSignedCert(args) {
 // ---------------------------------------------------------------------------
 
 class AgentEntry {
-  constructor(ws, gate, tenant = null) {
+  constructor(ws, gate, tenant = null, id = '') {
     this.ws = ws
     this.gate = gate // hex string supplied by the agent (derived from its PSK)
     this.streams = new Set() // sids
     this.alive = true
     this.tenant = tenant // null for the legacy admin --key
     this.quotaTripped = false
+    this.id = id
   }
 }
 
 const agents = new Map() // id -> AgentEntry
 const phoneByStream = new Map() // sid -> PhoneConn
 const tenantAgent = new Map() // tenant id -> { id, entry }
+/**
+ * Devices the relay cut on purpose, keyed by device id, so the phone gets a
+ * precise answer ("your quota is used up") instead of the generic "device is
+ * offline" that also covers a machine that simply has not reconnected.
+ * Entries are cleared when the device registers again and ignored after the UTC
+ * day rollover.
+ */
+const blockedDevices = new Map() // device id -> { reason, day }
 let tenantStore = null // set in main()
 let nextSid = 1
 
@@ -248,6 +257,9 @@ function allocSid() {
 function closeEntry(entry, reason) {
   if (!entry) return
   entry.alive = false
+  // Remember why this device was cut, so its phone can be told the reason
+  // instead of reading a generic "offline" page.
+  if (entry.id) blockedDevices.set(entry.id, { reason, day: quotaDayNow() })
   for (const sid of [...entry.streams]) {
     const phone = phoneByStream.get(sid)
     if (phone) phone.destroy(false)
@@ -273,7 +285,7 @@ function charge(entry, bytes) {
     if (!egressTripped) {
       egressTripped = true
       log(`egress limit reached: ${formatBytes(egressBytes)} today >= ${formatBytes(args.egressLimit)}; closing every connection`)
-      for (const live of agents.values()) closeEntry(live, 'quota-exceeded')
+      for (const live of agents.values()) closeEntry(live, 'egress-limit')
       tenantStore.saveIfDirty()
     }
   }
@@ -437,6 +449,23 @@ function handlePhoneSocket(args, socket) {
       const id = m[1]
       const entry = agents.get(id)
       if (!entry) {
+        // A device that was cut on purpose gets the real reason; anything else
+        // is simply not connected right now.
+        const blocked = blockedDevices.get(id)
+        if (blocked && blocked.day === quotaDayNow()) {
+          if (blocked.reason === 'egress-limit') {
+            return tinyResponse(socket, 503, 'Service Unavailable',
+              'dsh-relay: the whole relay has used up its daily traffic budget. It resets at 00:00 UTC.\n')
+          }
+          if (blocked.reason === 'quota-exceeded') {
+            return tinyResponse(socket, 429, 'Too Many Requests',
+              "dsh-relay: this key's traffic for today is used up. It resets at 00:00 UTC.\n")
+          }
+          if (blocked.reason === 'key-disabled') {
+            return tinyResponse(socket, 403, 'Forbidden',
+              'dsh-relay: this key is disabled on the relay.\n')
+          }
+        }
         return tinyResponse(socket, 503, 'Service Unavailable',
           'dsh-relay: device is offline (its dsh-relay-phone is not connected). Retry later.\n')
       }
@@ -634,8 +663,9 @@ function startAgentListener(args, tls) {
             try { previous.ws.terminate() } catch {}
             agents.delete(id)
           }
-          entry = new AgentEntry(ws, helloGate, tenant)
+          entry = new AgentEntry(ws, helloGate, tenant, id)
           agents.set(id, entry)
+          blockedDevices.delete(id)
           if (tenant) {
             tenantAgent.set(tenant.id, { id, entry })
             tenant.lastSeenAt = new Date().toISOString()
@@ -884,6 +914,12 @@ if (!tenantCount && !args.key) {
 const saveTimer = setInterval(() => {
   if (tenantStore.reloadIfChanged()) log(`tenants reloaded: ${tenantStore.list().length} tenant(s)`)
   tenantStore.saveIfDirty()
+  // Yesterday's cut reasons mean nothing today, and this map would otherwise
+  // grow by one entry per device ever cut.
+  const today = quotaDayNow()
+  for (const [deviceId, record] of blockedDevices) {
+    if (record.day !== today) blockedDevices.delete(deviceId)
+  }
   // `tenant disable` and `tenant remove` mean "stop now", not "stop on the next
   // reconnect": a connection that is already live would otherwise keep routing
   // traffic (and burning the day's quota) until it happened to drop.

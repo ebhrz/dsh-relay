@@ -328,6 +328,31 @@ try {
   const disableMsg = reverser.control.find((m) => m.t === 'rejected')
   assert.equal(disableMsg?.reason, 'key-disabled', `expected key-disabled, got ${JSON.stringify(reverser.control.slice(-2))}`)
 
+  // A phone for that device is told the key was disabled, not "offline".
+  const disabledPhone = await new Promise((resolve) => {
+    const sock = net.connect({ host: '127.0.0.1', port: phonePort })
+    let text = ''
+    sock.on('data', (chunk) => { text += chunk.toString('latin1') })
+    sock.on('close', () => resolve(text))
+    sock.on('error', () => resolve(text))
+    sock.once('connect', () => sock.write(`GET /c/REVERSE1/x?g=${GATE} HTTP/1.1\r\nhost: x\r\n\r\n`))
+    setTimeout(() => resolve(text), 5000)
+  })
+  assert.match(disabledPhone, /this key is disabled/, `phone should see the disable reason, got: ${disabledPhone.slice(0, 120)}`)
+
+  // And the exhausted tenant from earlier says the quota is gone, not "offline".
+  const exhaustedPhone = await new Promise((resolve) => {
+    const sock = net.connect({ host: '127.0.0.1', port: phonePort })
+    let text = ''
+    sock.on('data', (chunk) => { text += chunk.toString('latin1') })
+    sock.on('close', () => resolve(text))
+    sock.on('error', () => resolve(text))
+    sock.once('connect', () => sock.write(`GET /c/STREAM01/x?g=${GATE} HTTP/1.1\r\nhost: x\r\n\r\n`))
+    setTimeout(() => resolve(text), 5000)
+  })
+  assert.match(exhaustedPhone, /traffic for today is used up/, `phone should see the quota reason, got: ${exhaustedPhone.slice(0, 120)}`)
+  assert.match(exhaustedPhone, /^HTTP\/1\.1 429/, 'that answer is a 429, so a client can branch on it')
+
   // ── the process-wide egress brake ──────────────────────────────────
   // Independent of the per-tenant ledger: even a tenant that is allowed more
   // cannot push the whole relay past --egress-limit.
