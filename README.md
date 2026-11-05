@@ -72,17 +72,40 @@ The bridge dials **out** to the relay, so your machine needs no public port and 
 - The page shell is served by your own bridge over the relay, so anyone who can reach the relay *and* guess a device id still cannot pair without the PSK — but they will see the pairing page.
 - A phone that has paired stays paired for 30 days. Rotate the identity when a device is lost.
 
+## Install
+
+Both halves are published on npm. Nothing else is needed.
+
+| Package | Runs on | Install | Upgrade |
+|---|---|---|---|
+| [`dsh-relay-server`](https://www.npmjs.com/package/dsh-relay-server) | your VPS | `npm install -g dsh-relay-server` (or just `npx dsh-relay-server`) | `npm install -g dsh-relay-server@latest` |
+| [`dsh-relay-phone`](https://www.npmjs.com/package/dsh-relay-phone) | the machine running DSH | `dsh plugin --profile web add dsh-relay-phone` | same command again, then restart `dsh web` |
+
+Requirements: Node.js ≥ 22 where DSH runs, ≥ 18 on the relay, a machine with a public IP for the relay, and `openssl` on the relay host (for the self-signed agent certificate).
+
+```sh
+npx dsh-relay-server --version    # prints the relay version
+```
+
+The plugin is host-side code: after installing or upgrading it, restart `dsh web` and the panel footer shows the version it is running.
+
 ## Quick start
 
-Requirements: Node.js ≥ 22 where DSH runs, a machine with a public IP for the relay, and `openssl` on the relay host (for the self-signed agent certificate).
-
 ### 1. Relay server
+
+```sh
+npm install -g dsh-relay-server
+dsh-relay-server --port 8889 --agent-port 9000 --data-dir ~/.dsh-relay
+```
+
+Or without a global install, `npx dsh-relay-server@latest …` with the same flags.
+
+To run from a checkout instead:
 
 ```sh
 git clone https://github.com/ebhrz/dsh-relay.git
 cd dsh-relay
 npm install
-
 node packages/relay/src/index.mjs --port 8889 --agent-port 9000 --data-dir ~/.dsh-relay
 ```
 
@@ -129,10 +152,16 @@ npx dsh-relay-server --port 8889 --agent-port 9000 --egress-limit 2GB
 
 ```sh
 KEY="$(openssl rand -hex 24)"
-node packages/relay/src/index.mjs --port 8889 --agent-port 9000 --key "$KEY"
+dsh-relay-server --port 8889 --agent-port 9000 --key "$KEY"
 ```
 
 ### 2. Local bridge
+
+```sh
+dsh plugin --profile web add dsh-relay-phone
+```
+
+That installs the published package and registers its bundle. From a checkout, the same command with a path instead:
 
 ```sh
 cd dsh-relay
@@ -140,7 +169,9 @@ npm install --workspace dsh-relay-phone
 dsh plugin --profile web add link:./packages/plugin
 ```
 
-That registers the plugin bundle; restart `dsh web` (the plugin is host-side code). Then open the tokenised URL `dsh web` prints, and go to `/relay-bridge/panel` on that origin. Fill in the relay scheme, host, phone port (`8889`), agent port (`9000`) and the key from step 1.
+Either way the plugin is host-side code, so **restart `dsh web`**. Then open the tokenised URL `dsh web` prints, and go to `/relay-bridge/panel` on that origin. Fill in the relay scheme, host, phone port (`8889`), agent port (`9000`) and the key from step 1.
+
+**Upgrading.** `npm install -g dsh-relay-server@latest` for the relay; run the same `dsh plugin … add dsh-relay-phone` command again for the plugin, then restart `dsh web`. Both print their version (`dsh-relay-server --version`, and the panel footer).
 
 ### 3. Phone
 

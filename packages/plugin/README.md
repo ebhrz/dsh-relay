@@ -9,10 +9,16 @@ Part of [dsh-relay](https://github.com/ebhrz/dsh-relay). Read the [main README](
 ## Install
 
 ```sh
-dsh plugin --profile web add link:./packages/plugin   # from a clone
+dsh plugin --profile web add dsh-relay-phone
 ```
 
-Restart `dsh web` afterwards (the plugin is host-side code), then configure it at `/relay-bridge/panel`.
+From a checkout of the repository, point at the package instead:
+
+```sh
+dsh plugin --profile web add link:./packages/plugin
+```
+
+Restart `dsh web` afterwards (the plugin is host-side code), then configure it at `/relay-bridge/panel`. The panel is deliberately **desktop-only**: it prints the pairing link, which carries the device key, so requests that arrive through the relay are refused.
 
 ## Configuration
 
@@ -23,8 +29,10 @@ Saved by the panel to `~/.dsh/plugin-data/dsh-relay-phone/config.json`, which ov
 | `relayScheme` | `http` or `https` |
 | `relayHost`, `relayPort` | Relay address for phones |
 | `agentPort` | Relay port for agent connections |
-| `relayKey` | Shared key, must match the server's `--key` |
+| `relayKey` | The key this deployment was given: a tenant key from `dsh-relay-server tenant add`, or the server's admin `--key` |
 | `autoStart` | Connect on startup (default `true`) |
+
+A paired phone opens the mobile page; the full desktop UI stays reachable at `/c/<id>/?desktop=1` (or the drawer's "Open full desktop UI"), which is also how the entry link works in a desktop browser.
 
 ## Tests
 

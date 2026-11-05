@@ -80,17 +80,40 @@ dsh-relay 把它拆成三块：
   但会看到配对页。
 - 已配对的手机 30 天内保持有效。设备丢失时请轮换身份。
 
+## 安装
+
+两半都已发布到 npm，不需要克隆仓库。
+
+| 包 | 跑在哪 | 安装 | 升级 |
+|---|---|---|---|
+| [`dsh-relay-server`](https://www.npmjs.com/package/dsh-relay-server) | 你的 VPS | `npm install -g dsh-relay-server`（或直接用 `npx dsh-relay-server`） | `npm install -g dsh-relay-server@latest` |
+| [`dsh-relay-phone`](https://www.npmjs.com/package/dsh-relay-phone) | 跑 DSH 的机器 | `dsh plugin --profile web add dsh-relay-phone` | 再执行一次同样的命令，然后重启 `dsh web` |
+
+环境要求：跑 DSH 的机器 Node.js ≥ 22，中继 ≥ 18；中继需要有公网 IP；中继主机需要 `openssl`（生成 agent 自签证书）。
+
+```sh
+npx dsh-relay-server --version    # 打印中继版本
+```
+
+插件是宿主侧代码：装上或升级后都要重启 `dsh web`，面板页脚会显示实际在跑的版本。
+
 ## 快速开始
 
-环境要求：跑 DSH 的机器 Node.js ≥ 22；中继需要有公网 IP；中继主机需要 `openssl`（生成 agent 自签证书）。
-
 ### ① 中继服务器
+
+```sh
+npm install -g dsh-relay-server
+dsh-relay-server --port 8889 --agent-port 9000 --data-dir ~/.dsh-relay
+```
+
+不想全局安装就用 `npx dsh-relay-server@latest …`，参数相同。
+
+从仓库源码跑也可以：
 
 ```sh
 git clone https://github.com/ebhrz/dsh-relay.git
 cd dsh-relay
 npm install
-
 node packages/relay/src/index.mjs --port 8889 --agent-port 9000 --data-dir ~/.dsh-relay
 ```
 
@@ -141,10 +164,16 @@ npx dsh-relay-server --port 8889 --agent-port 9000 --egress-limit 2GB
 
 ```sh
 KEY="$(openssl rand -hex 24)"
-node packages/relay/src/index.mjs --port 8889 --agent-port 9000 --key "$KEY"
+dsh-relay-server --port 8889 --agent-port 9000 --key "$KEY"
 ```
 
 ### ② 本地桥接
+
+```sh
+dsh plugin --profile web add dsh-relay-phone
+```
+
+从仓库源码安装就把包名换成路径：
 
 ```sh
 cd dsh-relay
@@ -152,7 +181,7 @@ npm install --workspace dsh-relay-phone
 dsh plugin --profile web add link:./packages/plugin
 ```
 
-该命令把插件 bundle 注册进 profile；插件是宿主侧代码，**需要重启 `dsh web`**。然后打开 `dsh web`
+两种方式都是把插件 bundle 注册进 profile；插件是宿主侧代码，**需要重启 `dsh web`**。然后打开 `dsh web`
 启动时打印的带 token 地址，访问该 origin 下的 `/relay-bridge/panel`，填：协议、地址、
 手机端口（`8889`）、agent 端口（`9000`）、第 ① 步的 Key。
 
