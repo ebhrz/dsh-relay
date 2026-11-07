@@ -92,7 +92,7 @@ const responseCount = (text) => (text.match(/HTTP\/1\.1 /g) ?? []).length
   })
   const h = harness(server.address().port)
   h.pump.handleStreamData(12, Buffer.from(
-    `GET /c/${ID}/x?g=${GATE} HTTP/1.1\r\nHost: relay.example\r\nConnection: close\r\n\r\n`))
+    `GET /c/${ID}/assets/x.js?g=${GATE} HTTP/1.1\r\nHost: relay.example\r\nConnection: close\r\n\r\n`))
   await waitFor(() => h.closed.includes(12))
   assert.match(h.text(), /Connection: close/i)
   server.close()
@@ -114,12 +114,12 @@ const responseCount = (text) => (text.match(/HTTP\/1\.1 /g) ?? []).length
   const h = harness(server.address().port)
   const sid = 13
   const one = Buffer.from(
-    `GET /c/${ID}/one?g=${GATE} HTTP/1.1\r\nHost: relay.example\r\nConnection: keep-alive\r\n\r\n`)
+    `GET /c/${ID}/assets/one.js?g=${GATE} HTTP/1.1\r\nHost: relay.example\r\nConnection: keep-alive\r\n\r\n`)
   const two = Buffer.from(
-    `GET /c/${ID}/two?g=${GATE} HTTP/1.1\r\nHost: relay.example\r\nConnection: keep-alive\r\n\r\n`)
+    `GET /c/${ID}/assets/two.js?g=${GATE} HTTP/1.1\r\nHost: relay.example\r\nConnection: keep-alive\r\n\r\n`)
   h.pump.handleStreamData(sid, Buffer.concat([one, two]))
   await waitFor(() => responseCount(h.text()) === 2)
-  assert.deepEqual(hits, ['/one', '/two'])
+  assert.deepEqual(hits, ['/assets/one.js', '/assets/two.js'])
   server.close()
   h.pump.handleStreamClose(sid)
   console.log('ok 3: pipelined request replayed after the first response')
@@ -207,7 +207,7 @@ const responseCount = (text) => (text.match(/HTTP\/1\.1 /g) ?? []).length
   const h = harness(raw.address().port)
   const sid = 15
   h.pump.handleStreamData(sid, Buffer.from(
-    `GET /c/${ID}/loose?g=${GATE} HTTP/1.1\r\nHost: relay.example\r\nConnection: keep-alive\r\n\r\n`))
+    `GET /c/${ID}/assets/loose.js?g=${GATE} HTTP/1.1\r\nHost: relay.example\r\nConnection: keep-alive\r\n\r\n`))
   await waitFor(() => h.closed.includes(sid))
   assert.match(h.text(), /Connection: close/i, 'close-delimited body downgrades to close')
   raw.close()

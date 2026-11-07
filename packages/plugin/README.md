@@ -27,7 +27,13 @@ From a checkout of the repository, point at the package instead:
 dsh plugin --profile web add link:./packages/plugin
 ```
 
-Restart `dsh web` afterwards (the plugin is host-side code). Configure it from the sidebar's **Phone Entry** card → **Open console**; in the desktop app that navigates inside the window, so the port does not matter. The panel is deliberately **desktop-only**: it prints the pairing link, which carries the device key, so requests that arrive through the relay are refused.
+Restart `dsh web` afterwards (the plugin is host-side code). Configure it from the sidebar's **Phone Entry** card → **Open console**; in the desktop app that navigates inside the window, so the port does not matter. Through the relay only the phone page and the documents/assets it loads are plaintext; every
+other request must carry a sealed envelope or it is refused with 403. A relay that could forward
+plaintext `/api/*` with the host cookie attached would be able to act as you, which would make the
+end-to-end encryption decorative. Replaying the full desktop UI over the relay is opt-in:
+`{ "allowDesktopPlaintext": true }` in the plugin config.
+
+The panel is deliberately **desktop-only**: it prints the pairing link, which carries the device key, so requests that arrive through the relay are refused.
 
 ## Configuration
 

@@ -6,7 +6,7 @@
 // traffic leaves 127.0.0.1.
 
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import net from 'node:net'
@@ -251,6 +251,111 @@ await scenario('a connection that never sends a request line is dropped', async 
     await waitFor(() => socket.destroyed, 'the silent socket is closed', 6000)
     const elapsed = Date.now() - opened
     assert.ok(elapsed >= 900 && elapsed < 5000, `closed after ~1s, got ${elapsed}ms`)
+  } finally {
+    relay.stop()
+  }
+})
+
+// ── 5. dripping one byte at a time does not extend the deadline ─────
+await scenario('a slow-dripping pre-auth connection is still cut', async () => {
+  const relay = await startRelay(['--pre-auth-timeout', '1500'])
+  try {
+    const socket = net.connect({ host: '127.0.0.1', port: relay.phonePort })
+    relay.sockets.push(socket)
+    socket.on('error', () => {})
+    const opened = Date.now()
+    await new Promise((resolve) => socket.once('connect', resolve))
+    // An idle timeout would be refreshed by every byte; an absolute deadline is not.
+    const drip = setInterval(() => { if (!socket.destroyed) socket.write('G') }, 100)
+    try {
+      await waitFor(() => socket.destroyed, 'the dripping socket is closed', 8000)
+    } finally {
+      clearInterval(drip)
+    }
+    const elapsed = Date.now() - opened
+    assert.ok(elapsed >= 1200 && elapsed < 5000, `cut at the deadline, not on idle: ${elapsed}ms`)
+  } finally {
+    relay.stop()
+  }
+})
+
+// ── 6. an agent that upgrades but never registers is dropped ────────
+await scenario('an agent that never registers is dropped', async () => {
+  process.env.DSH_RELAY_REGISTRATION_MS = '800'
+  const relay = await startRelay()
+  try {
+    const ws = new WebSocket(`wss://127.0.0.1:${relay.agentPort}/agent`, { rejectUnauthorized: false })
+    const closed = new Promise((resolve) => ws.once('close', resolve))
+    await new Promise((resolve, reject) => {
+      ws.once('open', resolve)
+      ws.once('error', reject)
+    })
+    const opened = Date.now()
+    await Promise.race([
+      closed,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('still open after 6s')), 6000)),
+    ])
+    assert.ok(Date.now() - opened < 5000, 'closed by the registration deadline')
+  } finally {
+    delete process.env.DSH_RELAY_REGISTRATION_MS
+    relay.stop()
+  }
+})
+
+// ── 7. an oversized agent frame is refused ──────────────────────────
+await scenario('a frame above maxPayload closes the agent connection', async () => {
+  const relay = await startRelay()
+  try {
+    const created = relay.tenant('bulk')
+    const agent = await registerAgent(relay, 'BULK0001', { key: created.key })
+    assert.ok(agent.registered, 'agent registered')
+    const closed = new Promise((resolve) => agent.ws.once('close', resolve))
+    agent.ws.send(Buffer.alloc(9 * 1024 * 1024, 0x41), { binary: true })
+    await Promise.race([
+      closed,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('connection stayed open')), 8000)),
+    ])
+  } finally {
+    relay.stop()
+  }
+})
+
+// ── 8. the ledger is private and the CLI never prints the secret ────
+await scenario('the tenant ledger is 0600 in a 0700 directory and never echoed', async () => {
+  const relay = await startRelay()
+  try {
+    relay.tenant('modes')
+    if (process.platform !== 'win32') {
+      const file = path.join(relay.dir, 'tenants.json')
+      const fileMode = fs.statSync(file).mode & 0o777
+      const dirMode = fs.statSync(relay.dir).mode & 0o777
+      assert.equal(fileMode, 0o600, `ledger mode ${fileMode.toString(8)}`)
+      assert.equal(dirMode, 0o700, `directory mode ${dirMode.toString(8)}`)
+    }
+    const shown = execFileSync(process.execPath, [
+      relayPath, 'tenant', 'show', 'modes', '--data-dir', relay.dir,
+    ], { encoding: 'utf8' })
+    assert.ok(!/[0-9a-f]{64}/.test(shown), 'no 64-hex secret in the output')
+    assert.match(shown, /"keyId"/, 'the non-secret key id is still there')
+  } finally {
+    relay.stop()
+  }
+})
+
+// ── 9. a 404 log line does not leak the gate ───────────────────────
+await scenario('the 404 log line redacts the gate', async () => {
+  const relay = await startRelay()
+  try {
+    const gate = 'f'.repeat(64)
+    const socket = net.connect({ host: '127.0.0.1', port: relay.phonePort })
+    relay.sockets.push(socket)
+    socket.on('error', () => {})
+    await new Promise((resolve) => socket.once('connect', resolve))
+    socket.write(`GET /nope?g=${gate} HTTP/1.1\r\nhost: x\r\nreferer: https://x/c/A/?g=${gate}\r\n\r\n`)
+    await waitFor(() => relay.log().includes('404-noprefix'), 'the 404 is logged')
+    await new Promise((done) => setTimeout(done, 200))
+    assert.ok(!relay.log().includes(gate), 'the gate never appears in the log')
+    assert.match(relay.log(), /<redacted>/, 'the log marks the redaction')
   } finally {
     relay.stop()
   }

@@ -135,16 +135,26 @@ export class TenantStore {
     return true
   }
 
-  /** Atomic write; a crash mid-save must not lose the quota ledger. */
+  /**
+   * Atomic write; a crash mid-save must not lose the quota ledger.
+   *
+   * The file holds each tenant's HMAC key — the value the relay itself verifies a
+   * registration proof against, so whoever reads it can impersonate that tenant
+   * to this relay. It is written 0600 inside a 0700 directory; a world-readable
+   * ledger would be a credential leak, not just a privacy one.
+   */
   save() {
-    fs.mkdirSync(path.dirname(this.file), { recursive: true })
+    const dir = path.dirname(this.file)
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
+    try { fs.chmodSync(dir, 0o700) } catch {}
     const payload = {
       version: 1,
       tenants: [...this.tenants.values()].sort((a, b) => a.id.localeCompare(b.id)),
     }
     const tmp = `${this.file}.tmp`
-    fs.writeFileSync(tmp, `${JSON.stringify(payload, null, 2)}\n`)
+    fs.writeFileSync(tmp, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 })
     fs.renameSync(tmp, this.file)
+    try { fs.chmodSync(this.file, 0o600) } catch {}
     this.dirty = false
     this.mtimeMs = this.statMtime()
   }

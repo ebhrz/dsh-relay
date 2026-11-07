@@ -37,6 +37,8 @@ const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.met
 // How much unread data a phone may accumulate before its stream is dropped.
 // Bounds relay memory when a client opens a stream and stops reading.
 const MAX_PHONE_BACKLOG = 4 * 1024 * 1024
+// Same bound for frames queued towards the agent (an agent that stops reading).
+const MAX_STREAM_BACKLOG = 4 * 1024 * 1024
 
 function parseArgs(argv) {
   const args = {
@@ -174,11 +176,14 @@ function timingSafeEqual(a, b) {
 }
 
 /**
- * `?g=<gate>` is a bearer credential for the phone path: it is fine on the wire,
- * but it has no business in a log line.
+ * Credentials have no business in a log line: the phone path's gate rides in
+ * `?g=`, the pairing cookie, and a Referer can carry either.
  */
 function redactGate(text) {
-  return String(text).replace(/([?&]g=)[0-9a-fA-F]{16,}/g, '$1<redacted>')
+  return String(text)
+    .replace(/([?&]g=)[0-9a-fA-F]{16,}/g, '$1<redacted>')
+    .replace(/(__relay_[gt]=)[0-9a-fA-F]{16,}/g, '$1<redacted>')
+    .replace(/(referer:\s*)(\S+)/gi, '$1<redacted>')
 }
 
 // ---------------------------------------------------------------------------
@@ -392,6 +397,14 @@ function sidPrefix(sid) {
 
 function sendStream(entry, sid, chunk) {
   if (!entry.alive || entry.ws.readyState !== 1) return
+  // The phone → agent direction needs the same bound as the reverse one: an
+  // agent that stops reading must not make the relay buffer its traffic.
+  if (entry.ws.bufferedAmount > MAX_STREAM_BACKLOG) {
+    log(`agent-backlog sid=${sid} pending=${entry.ws.bufferedAmount} -> closing the stream`)
+    const phone = phoneByStream.get(sid)
+    if (phone && phone.entry === entry) phone.destroy(true)
+    return
+  }
   entry.ws.send(Buffer.concat([sidPrefix(sid), chunk]), { binary: true })
 }
 
@@ -484,11 +497,24 @@ function handlePhoneSocket(args, socket) {
   // Nothing is authenticated until a request line arrives, and the concurrency
   // cap only applies after that: a client that connects and stays silent would
   // otherwise hold a descriptor forever (slowloris).
-  socket.setTimeout(args.preAuthTimeoutMs, () => {
+  //
+  // This is an absolute deadline, not an idle timeout: `socket.setTimeout` fires
+  // only when the socket goes quiet, so one byte every few seconds would keep a
+  // pre-auth connection alive forever. The timer is cleared once the request is
+  // routed (or the socket dies).
+  let preAuthTimer = setTimeout(() => {
     if (socket.destroyed) return
-    log('phone-timeout: no complete request line, closing')
+    log('phone-timeout: no complete request line before the pre-auth deadline')
     socket.destroy()
-  })
+  }, args.preAuthTimeoutMs)
+  preAuthTimer.unref?.()
+  const clearPreAuth = () => {
+    if (!preAuthTimer) return
+    clearTimeout(preAuthTimer)
+    preAuthTimer = null
+  }
+  socket.once('close', clearPreAuth)
+  socket.once('error', clearPreAuth)
     let buffer = Buffer.alloc(0)
 
     const onFirstLine = (line, gateCookie, fullHead) => {
@@ -549,9 +575,9 @@ function handlePhoneSocket(args, socket) {
       if (!m) {
         var headText2 = fullHead ? fullHead.toString('latin1') : ''
         var refLine = headText2.match(/referer:\s*([^\r\n]*)/i)
-        log(`404-noprefix ${line.split(' ').slice(0, 2).join(' ')} ref=${refLine ? refLine[1].slice(0, 70) : 'none'}`)
+        log(`404-noprefix ${redactGate(line.split(' ').slice(0, 2).join(' '))} ref=${refLine ? redactGate(refLine[1].slice(0, 70)) : 'none'}`)
         return tinyResponse(socket, 404, 'Not Found',
-          `dsh-relay: unknown path ${rawPath}. Phones open /c/<id>/?g=<gate> links from the dsh-relay-phone settings page.\n`)
+          `dsh-relay: unknown path ${rawPath}. Phones open /c/<id>/?g=<gate> links from the dsh-relay-phone settings panel.\n`)
       }
       const id = m[1]
       if (egressBlocked()) {
@@ -606,6 +632,7 @@ function handlePhoneSocket(args, socket) {
       log(`phone-start sid=${sid} firstLine=${JSON.stringify(redactGate(firstBytes.subarray(0, 90).toString('latin1').split('\\r\\n')[0]))}`)
       // The request is in and the stream is bridged: the pre-auth deadline is
       // gone, a long-lived streaming response is normal from here on.
+      clearPreAuth()
       socket.setTimeout(0)
       phoneByStream.set(sid, new PhoneConn(socket, entry, sid, firstBytes, remainderBytes))
     }
@@ -674,7 +701,10 @@ function startAgentListener(args, tls) {
   if (args.maxConnections > 0) server.maxConnections = args.maxConnections
   server.headersTimeout = Math.max(args.preAuthTimeoutMs, 5000)
   server.requestTimeout = args.preAuthTimeoutMs * 2
-  const wss = new WebSocketServer({ noServer: true })
+  // A single agent frame is a phone chunk or a control message; 8 MB is far
+  // above both and keeps an unauthenticated peer from making us buffer whatever
+  // it likes (ws defaults to 100 MB).
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 8 * 1024 * 1024 })
 
   server.on('upgrade', (req, socket, head) => {
     const url = new URL(req.url, 'http://x')
@@ -696,8 +726,19 @@ function startAgentListener(args, tls) {
     let pongMisses = 0
     ws._socket.setNoDelay(true)
 
+    // An upgraded socket that never registers still holds a slot (and a pong
+    // loop keeps it alive indefinitely). Registration must finish in time.
+    const registrationDeadline = setTimeout(() => {
+      if (registered || ws.readyState !== 1) return
+      log('agent dropped: no registration before the deadline')
+      try { ws.send(JSON.stringify({ t: 'rejected', reason: 'registration timeout' })) } catch {}
+      setTimeout(() => ws.terminate(), 250)
+    }, Number(process.env.DSH_RELAY_REGISTRATION_MS ?? 15_000))
+    registrationDeadline.unref?.()
+
     const failConn = (reason) => {
       log(`agent rejected: ${reason}`)
+      clearTimeout(registrationDeadline)
       try { ws.send(JSON.stringify({ t: 'rejected', reason })) } catch {}
       setTimeout(() => ws.terminate(), 250)
     }
@@ -810,6 +851,7 @@ function startAgentListener(args, tls) {
             tenantStore.dirty = true
           }
           registered = true
+          clearTimeout(registrationDeadline)
           log(`agent registered id=${id}${tenant ? ` tenant=${tenant.id}` : ' (admin key)'}`)
           ws.send(JSON.stringify({ t: 'registered' }))
           return
@@ -843,6 +885,7 @@ function startAgentListener(args, tls) {
 
     ws.on('close', () => {
       clearInterval(heartbeat)
+      clearTimeout(registrationDeadline)
       if (entry && agents.get(entry.key) === entry) {
         forgetEntry(entry)
         for (const sid of [...entry.streams]) {
@@ -976,7 +1019,10 @@ function runTenantCli(argv) {
       const tenant = store.resolve(flags.name ?? positional[0])
       if (!tenant) fail(`no tenant ${flags.name ?? positional[0]}`)
       const used = tenant.day === quotaDayNow() ? tenant.usedBytesDay : 0
-      console.log(JSON.stringify({ ...tenant, usedToday: used, today: quotaDayNow() }, null, 2))
+      // `secret` is the value this relay verifies registration proofs against, so
+      // it is a credential, not a fingerprint: never print it.
+      const { secret, ...safe } = tenant
+      console.log(JSON.stringify({ ...safe, usedToday: used, today: quotaDayNow() }, null, 2))
       return
     }
     case 'disable':

@@ -20,6 +20,9 @@ import { auditLog } from './identity.js'
 export const TICKET_TTL_SECONDS = 30 * 24 * 3600
 export const COOKIE_NAME = '__relay_t'
 const CHALLENGE_TTL_MS = 60000
+// A pairing handshake needs exactly one live challenge; a handful of concurrent
+// tabs is plenty. Anything past this is an attempt to grow memory from outside.
+const MAX_CHALLENGES = 32
 const BODY_LIMIT = 64 * 1024
 
 export class PairingService {
@@ -33,6 +36,17 @@ export class PairingService {
     const now = Date.now()
     for (const [snonce, entry] of this.challenges) {
       if (now - entry.createdAt > CHALLENGE_TTL_MS) this.challenges.delete(snonce)
+    }
+    // Time alone is not a bound: whoever holds the gate can ask for challenges as
+    // fast as they like, and each one lives for a minute. Keep the newest few and
+    // drop the oldest, so the table has a hard ceiling.
+    if (this.challenges.size > MAX_CHALLENGES) {
+      const excess = this.challenges.size - MAX_CHALLENGES
+      let dropped = 0
+      for (const snonce of this.challenges.keys()) {
+        this.challenges.delete(snonce)
+        if (++dropped >= excess) break
+      }
     }
   }
 

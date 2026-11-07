@@ -175,6 +175,10 @@ export default class RelayBridgeService extends Service {
       dshHost: stored.dshHost ?? base.dshHost ?? '127.0.0.1',
       dshPort: Number(stored.dshPort ?? base.dshPort ?? 3080),
       autoStart: base.autoStart !== false,
+      // Opt-in only: replaying the desktop UI over the relay forwards its
+      // plaintext /api/* calls with the host cookie, so the relay operator could
+      // act as the user. The phone page never needs this.
+      allowDesktopPlaintext: stored.allowDesktopPlaintext ?? base.allowDesktopPlaintext ?? false,
     }
   }
 

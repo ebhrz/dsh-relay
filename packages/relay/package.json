@@ -1,6 +1,6 @@
 {
   "name": "dsh-relay-server",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Zero-knowledge relay for dsh-relay-phone: no accounts, no database, routes end-to-end encrypted streams by device id.",
   "type": "module",
   "bin": {

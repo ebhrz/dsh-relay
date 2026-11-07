@@ -15,12 +15,13 @@ const listen = (handler) => new Promise((resolve) => {
   server.listen(0, '127.0.0.1', () => resolve(server))
 })
 
-function harness(port) {
+function harness(port, options = {}) {
   const pump = new PumpManager({
     resolveTarget: () => ({ host: '127.0.0.1', port, authority: `127.0.0.1:${port}`, protocol: 'http:' }),
     resolveAuthCookie: () => 'dsh-auth=test',
     pairing: { sessionForHeaders: () => ({ did: 'test' }), handle: () => null },
     cryptoBox: {},
+    ...options,
   })
   const out = []
   const closed = []
@@ -66,17 +67,26 @@ const request = (path, extra = '') => Buffer.from(
   assert.match(h.text(), /403 Forbidden/, 'the panel page is refused over the relay')
   assert.deepEqual(hits, [], 'still nothing reaches the host')
 
-  // The ordinary DSH surface keeps working, and is marked as relayed.
+  // A plaintext API call must not reach the host: the relay sees the ticket, so
+  // forwarding one would let it act as the user.
   h.reset()
   h.pump.handleStreamData(23, request('/api/status'))
+  await waitFor(() => h.closed.includes(23))
+  assert.match(h.text(), /403 Forbidden/, 'plaintext /api traffic is refused over the relay')
+  assert.deepEqual(hits, [], 'the host never sees it')
+
+  // Documents and their assets are what a browser fetches by itself, so they
+  // still pass — and are marked as relayed.
+  h.reset()
+  h.pump.handleStreamData(24, request('/assets/app.js'))
   // Wait for the forwarded response, not just for the upstream to be hit: those
   // are separate events, and the gap is wide enough to flake on CI.
   await waitFor(() => /200 OK/.test(h.text()))
-  assert.deepEqual(hits, ['/api/status'])
+  assert.deepEqual(hits, ['/assets/app.js'])
 
   server.close()
-  h.pump.handleStreamClose(23)
-  console.log('ok 1: /relay-bridge/* is blocked over the relay, the rest forwards')
+  h.pump.handleStreamClose(24)
+  console.log('ok 1: /relay-bridge/* and plaintext APIs are blocked over the relay, documents forward')
 }
 
 // ── 2. the relayed marker cannot be forged by the client ───────────────
@@ -88,10 +98,65 @@ const request = (path, extra = '') => Buffer.from(
     res.end('ok')
   })
   const h = harness(server.address().port)
-  h.pump.handleStreamData(31, request('/api/status', 'x-dsh-relay: 0\r\n'))
+  h.pump.handleStreamData(31, request('/assets/app.js', 'x-dsh-relay: 0\r\n'))
   await waitFor(() => seen.length === 1)
   assert.equal(seen[0], '1', 'the pump sets its own marker')
   server.close()
   h.pump.handleStreamClose(31)
   console.log('ok 2: a client-supplied x-dsh-relay header is replaced')
+}
+
+// ── 3. plaintext writes and upgrades are refused ────────────────────────
+{
+  const hits = []
+  const server = await listen((req, res) => {
+    hits.push(req.url)
+    res.writeHead(200, { 'content-type': 'text/plain', 'content-length': '2' })
+    res.end('ok')
+  })
+  const h = harness(server.address().port)
+
+  const post = (path) => Buffer.from(
+    `POST /c/${ID}${path}?g=${GATE} HTTP/1.1\r\nHost: relay.example\r\n`
+    + 'content-type: application/json\r\ncontent-length: 2\r\nConnection: close\r\n\r\n{}',
+  )
+
+  // A mutation with a ticket but no envelope would reach DSH with the host cookie.
+  h.pump.handleStreamData(41, post('/api/session'))
+  await waitFor(() => h.closed.includes(41))
+  assert.match(h.text(), /403 Forbidden/, 'plaintext API writes are refused')
+  assert.deepEqual(hits, [], 'the host never sees them')
+
+  // Same for a websocket upgrade: the deskop UI socket is not reachable either.
+  h.reset()
+  h.pump.handleStreamData(42, Buffer.from(
+    `GET /c/${ID}/api/ws?g=${GATE} HTTP/1.1\r\nHost: relay.example\r\n`
+    + 'Upgrade: websocket\r\nConnection: Upgrade\r\n'
+    + 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n',
+  ))
+  await waitFor(() => h.closed.includes(42))
+  assert.match(h.text(), /403 Forbidden/, 'plaintext upgrades are refused')
+  assert.deepEqual(hits, [], 'still nothing reaches the host')
+
+  server.close()
+  console.log('ok 3: plaintext writes and upgrades are refused over the relay')
+}
+
+// ── 4. the opt-in that restores the old desktop replay ──────────────────
+{
+  const hits = []
+  const server = await listen((req, res) => {
+    hits.push(req.url)
+    res.writeHead(200, { 'content-type': 'application/json', 'content-length': '2' })
+    res.end('{}')
+  })
+  const h = harness(server.address().port, { allowDesktopPlaintext: true })
+  h.pump.handleStreamData(51, Buffer.from(
+    `GET /c/${ID}/api/status?g=${GATE} HTTP/1.1\r\nHost: relay.example\r\nConnection: close\r\n\r\n`,
+  ))
+  await waitFor(() => /200 OK/.test(h.text()))
+  assert.deepEqual(hits, ['/api/status'], 'the opt-in forwards the desktop UI calls')
+  server.close()
+  h.pump.handleStreamClose(51)
+  console.log('ok 4: allowDesktopPlaintext restores the desktop replay (documented risk)')
 }

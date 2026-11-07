@@ -84,6 +84,20 @@ requests that arrive through the relay are refused. In the desktop app that butt
 same-origin, so the port does not matter; `dsh web` from a terminal prints the URL to append
 `/relay-bridge/panel` to.
 
+⚠️ **Through the relay only the phone page is plaintext** (plus the documents and assets it loads);
+every other request must carry a sealed envelope or gets a 403. The reason is blunt: the relay is
+both the TLS endpoint and the holder of your pairing ticket, so if it also forwarded plaintext
+`/api/*` with your host cookie attached, it could act as you — which would make the end-to-end
+encryption decorative. "Full desktop UI through the relay" is therefore off by default:
+
+```json
+// ~/.dsh/plugin-data/dsh-relay-phone/config.json
+{ "allowDesktopPlaintext": true }
+```
+
+Turning it on means accepting that the relay operator can impersonate you. On a LAN, an SSH tunnel
+or a VPN the desktop UI needs nothing special.
+
 ### Headless server (no desktop, no browser)
 
 DSH is a Node service: `dsh web` binds loopback and never touches a display, so a remote box, a

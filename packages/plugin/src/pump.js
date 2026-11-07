@@ -44,6 +44,22 @@ const EMPTY = Buffer.alloc(0)
 // every phone request, so unconditional logging floods the host console.
 const DEBUG = process.env.DSH_RELAY_DEBUG === '1'
 
+// Requests the phone's browser makes by itself (documents and their assets) can
+// never be sealed, so they are the only plaintext traffic allowed through from a
+// paired phone. Anything that can change state or return private data must carry
+// a sealed envelope; otherwise the relay — which terminates TLS and sees the
+// ticket — could replay a ticket and act as the user against the local DSH.
+const PLAINTEXT_DOCUMENT = new RegExp(
+  '^(?:' +
+  '/|' + // index document
+  '/index\\.html|' +
+  '/favicon\\.ico|' +
+  '/assets/[A-Za-z0-9._@/-]+|' + // built UI bundles
+  '/plugins/[A-Za-z0-9._@/%-]*|' + // client bundle entry (/plugins/??pkg/file.js)
+  '/[^?]*\\.(?:js|mjs|css|map|json|png|jpe?g|gif|svg|webp|avif|ico|woff2?|ttf|otf)' +
+  ')$',
+)
+
 export class PumpManager {
   constructor(options) {
     this.dshPort = options.dshPort ?? 3080
@@ -65,6 +81,11 @@ export class PumpManager {
     // Mobile app surface (purpose-built phone page + its local API). Optional:
     // without it the pump only replays the desktop DSH UI.
     this.mobile = options.mobile ?? null
+    // Escape hatch for "replay the desktop UI over the relay": that UI talks to
+    // /api/* in plaintext, so allowing it means the relay can act as the user.
+    // Off by default; the phone page is the supported remote experience.
+    this.allowDesktopPlaintext = options.allowDesktopPlaintext === true
+      || process.env.DSH_RELAY_ALLOW_PLAINTEXT === '1'
     this.streams = new Map()
   }
 
@@ -409,7 +430,32 @@ export class PumpManager {
       this.prepareSealedForward(sid, stream, info, headText, rest)
       return
     }
+
+    // Anything unsealed past this point would be forwarded to the local DSH with
+    // the host's own browser cookie attached. The relay sees the ticket and the
+    // gate, so it could mint the same request itself: plaintext is limited to
+    // the documents and assets a browser fetches on its own.
+    if (!this.allowDesktopPlaintext && !this.isPlaintextDocument(info, isUpgrade)) {
+      auditLog(`relayed plaintext ${info.method} ${info.path} refused (sealed only)`)
+      this.respondInline(
+        sid, 403, 'Forbidden',
+        'dsh-relay-phone: only documents and static assets may travel unsealed\n',
+      )
+      this.closeStream(sid)
+      return
+    }
     this.plainForward(sid, stream, info, headText, rest, { isUpgrade, isDocument, relay: stream.relay })
+  }
+
+  /**
+   * True for the GET/HEAD document + asset traffic a phone browser issues by
+   * itself. Explicitly excludes `/api/`, the mobile RPC path and upgrades.
+   */
+  isPlaintextDocument(info, isUpgrade) {
+    if (isUpgrade) return false
+    if (info.method !== 'GET' && info.method !== 'HEAD') return false
+    if (info.path.startsWith('/api/')) return false
+    return PLAINTEXT_DOCUMENT.test(info.path)
   }
 
   /** Route one ticketed request that belongs to the mobile app surface. */
@@ -767,7 +813,17 @@ export class PumpManager {
             plain = this.cryptoBox.open(this.cryptoBox.envelopeKey, Buffer.from(json.__relay, 'base64'))
           }
         } catch {}
-        if (!plain) plain = frame.payload // non-boot client (curl etc.): pass raw
+        if (!plain) {
+          // Only the explicit "desktop UI over the relay" mode may pass an
+          // unsealed frame upstream; otherwise a failure here is an attack on the
+          // sealed channel, not a legacy client.
+          if (!this.allowDesktopPlaintext) {
+            auditLog('sealed websocket frame could not be opened; closing the stream')
+            this.closeStream(sid)
+            return
+          }
+          plain = frame.payload
+        }
         // DSH 0.2's API gateway closes a binary frame with 1003 ("text
         // messages required"). The boot patch always sends JSON text, so
         // re-frame the decrypted payload as text upstream.

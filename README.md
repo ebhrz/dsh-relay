@@ -79,6 +79,18 @@ dsh plugin --profile web add link:./packages/plugin
 里点那个按钮是同源跳转，**不需要知道端口**；命令行启动的 `dsh web` 用它打印的地址加
 `/relay-bridge/panel`。
 
+⚠️ **走中继时只有手机页**（和它加载的文档/静态资源）是明文；其余请求必须带加密信封，否则直接
+403。原因很硬：中继既是 TLS 终点、又看得到配对票据，如果它还愿意替你转发明文 `/api/*` 并附上
+本机 Cookie，那它就能以你的身份操作这台 DSH——端到端加密就白做了。所以「完整桌面界面走中继」
+默认关闭，需要时显式打开：
+
+```json
+// ~/.dsh/plugin-data/dsh-relay-phone/config.json
+{ "allowDesktopPlaintext": true }
+```
+
+打开就等于接受"中继运营者可以冒充我"。局域网、SSH 隧道或 VPN 里用桌面界面不需要它。
+
 ### 无头服务器（没有桌面、没有浏览器）
 
 DSH 本体就是 Node 服务，`dsh web` 只绑定 loopback，不碰显示器——所以远程机器、容器、NAS 上都能跑：
