@@ -1,13 +1,29 @@
 name: tests
 
+# Documentation-only pushes do not need a test run: while this repository is
+# private every run is billed against the account's Action minutes, and a README
+# edit proves nothing about the code. A commit that touches both still runs.
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.gitignore'
+      - 'LICENSE'
   pull_request:
+  workflow_dispatch:
+
+# Superseded runs are pure cost: cancel the older one instead of paying for both.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    # A hung test must not burn the whole quota.
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
