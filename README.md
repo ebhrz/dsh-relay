@@ -187,9 +187,12 @@ npm install --workspace dsh-relay-phone
 dsh plugin --profile web add link:./packages/plugin
 ```
 
-两种方式都是把插件 bundle 注册进 profile；插件是宿主侧代码，**需要重启 `dsh web`**。然后打开 `dsh web`
-启动时打印的带 token 地址，访问该 origin 下的 `/relay-bridge/panel`，填：协议、地址、
-手机端口（`8889`）、agent 端口（`9000`）、第 ① 步的 Key。
+两种方式都是把插件 bundle 注册进 profile；插件是宿主侧代码，**需要重启 `dsh web`**。
+
+打开中继面板填配置（协议、地址、手机端口 `8889`、agent 端口 `9000`、第 ① 步的 Key），两条路都行：
+
+- **桌面 App**：侧边栏「手机入口」→ 卡片里「去控制台配置」/「打开完整控制台」。它走同源跳转，在同一个窗口里打开，**不需要知道端口**。
+- **命令行 `dsh web`**：用它启动时打印的带 token 地址，后面加 `/relay-bridge/panel`。
 
 ### ③ 手机
 

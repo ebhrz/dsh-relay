@@ -176,7 +176,12 @@ npm install --workspace dsh-relay-phone
 dsh plugin --profile web add link:./packages/plugin
 ```
 
-Either way the plugin is host-side code, so **restart `dsh web`**. Then open the tokenised URL `dsh web` prints, and go to `/relay-bridge/panel` on that origin. Fill in the relay scheme, host, phone port (`8889`), agent port (`9000`) and the key from step 1.
+Either way the plugin is host-side code, so **restart `dsh web`**.
+
+Open the relay console to fill it in (scheme, host, phone port `8889`, agent port `9000` and the key from step 1). Two ways:
+
+- **Desktop app**: the sidebar's **Phone Entry** card → **Open console**. It navigates same-origin inside the window, so **you never need the port**.
+- **`dsh web` from a terminal**: take the tokenised URL it prints and append `/relay-bridge/panel`.
 
 **Upgrading.** `npm install -g dsh-relay-server@latest` for the relay; run the same `dsh plugin … add dsh-relay-phone` command again for the plugin, then restart `dsh web`. Both print their version (`dsh-relay-server --version`, and the panel footer).
 

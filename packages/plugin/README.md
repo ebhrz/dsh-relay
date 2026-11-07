@@ -22,7 +22,7 @@ From a checkout of the repository, point at the package instead:
 dsh plugin --profile web add link:./packages/plugin
 ```
 
-Restart `dsh web` afterwards (the plugin is host-side code), then configure it at `/relay-bridge/panel`. The panel is deliberately **desktop-only**: it prints the pairing link, which carries the device key, so requests that arrive through the relay are refused.
+Restart `dsh web` afterwards (the plugin is host-side code). Configure it from the sidebar's **Phone Entry** card → **Open console**; in the desktop app that navigates inside the window, so the port does not matter. The panel is deliberately **desktop-only**: it prints the pairing link, which carries the device key, so requests that arrive through the relay are refused.
 
 ## Configuration
 
