@@ -173,6 +173,14 @@ function timingSafeEqual(a, b) {
   return crypto.timingSafeEqual(ba, bb)
 }
 
+/**
+ * `?g=<gate>` is a bearer credential for the phone path: it is fine on the wire,
+ * but it has no business in a log line.
+ */
+function redactGate(text) {
+  return String(text).replace(/([?&]g=)[0-9a-fA-F]{16,}/g, '$1<redacted>')
+}
+
 // ---------------------------------------------------------------------------
 // Self-signed certificate for the agent listener (the agent pins the
 // fingerprint, so a CA-signed cert is unnecessary). openssl on first run.
@@ -595,7 +603,7 @@ function handlePhoneSocket(args, socket) {
       const sid = allocSid()
       entry.streams.add(sid)
       const firstBytes = fullHead ?? Buffer.from(`${line}\r\n`, 'latin1')
-      log(`phone-start sid=${sid} firstLine=${JSON.stringify(firstBytes.subarray(0, 90).toString('latin1').split('\\r\\n')[0])}`)
+      log(`phone-start sid=${sid} firstLine=${JSON.stringify(redactGate(firstBytes.subarray(0, 90).toString('latin1').split('\\r\\n')[0]))}`)
       // The request is in and the stream is bridged: the pre-auth deadline is
       // gone, a long-lived streaming response is normal from here on.
       socket.setTimeout(0)
@@ -844,7 +852,7 @@ function startAgentListener(args, tls) {
   })
 
   server.listen(args.agentPort, args.agentHost, () => {
-    log(`agent listener: wss://${args.host}:${args.agentPort}/agent (self-signed; agents pin the fingerprint)`)
+    log(`agent listener: wss://${args.agentHost ?? '0.0.0.0'}:${args.agentPort}/agent (self-signed; agents pin the fingerprint)`)
   })
   return server
 }
