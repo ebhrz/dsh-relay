@@ -164,6 +164,17 @@ dsh-relay-server --port 8889 --agent-port 9000 --key "$KEY"
 
 ### 2. Local bridge
 
+**Desktop app, no terminal needed:** open the **Plugins** page → **Add plugin** → type
+`dsh-relay-phone` in the package field → Enter. Then click **Enable now** and restart
+DSH when it asks (the plugin is host-side code).
+
+The same field also takes a version (`dsh-relay-phone@0.11.10`), a git URL, a `.tgz`
+tarball or an absolute local path, and the dialog lets you pick the registry (npm or
+a mainland mirror). Other plugins update by uninstalling and reinstalling — there is
+no per-plugin "update" button.
+
+**From a terminal:**
+
 ```sh
 dsh plugin --profile web add dsh-relay-phone
 ```

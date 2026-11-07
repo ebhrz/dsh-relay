@@ -12,6 +12,11 @@ what the rest of this repository is for.
 
 ## Install
 
+**From the desktop app (no terminal):** **Plugins** page → **Add plugin** → type
+`dsh-relay-phone` → Enter → **Enable now** → restart DSH when it asks.
+
+**From a terminal:**
+
 ```sh
 dsh plugin --profile web add dsh-relay-phone
 ```

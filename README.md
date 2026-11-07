@@ -175,6 +175,14 @@ dsh-relay-server --port 8889 --agent-port 9000 --key "$KEY"
 
 ### ② 本地桥接
 
+**桌面 App（不用命令行）**：打开**插件**页 → 点「**添加插件**」→ 在包名框里输入 `dsh-relay-phone` → 回车。
+装完点「**立即启用**」，按提示**重启 DSH**（插件是宿主侧代码）。
+
+这个框也接受带版本号（`dsh-relay-phone@0.11.10`）、Git 地址、`.tgz` 压缩包和本地绝对路径；安装源可以选
+npm 官方或大陆镜像。其他插件升级时要「卸载再装」，没有单独的"更新"按钮。
+
+**命令行**：
+
 ```sh
 dsh plugin --profile web add dsh-relay-phone
 ```
