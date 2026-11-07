@@ -30,6 +30,133 @@ On the phone you get:
 
 ---
 
+## Install (two steps, then scan)
+
+> **No relay of your own?** Open **<https://dshrelay.com:8443/>**, claim a **50 MB/day** key with
+> one click (10 a day, resets at 00:00 UTC, the page shows what is left), then skip to step ②.
+
+### ① Relay: on your own VPS, or skip it
+
+Using the trial above means **skipping this step**: in step ③ you fill in `dshrelay.com`, `8443`
+and `9443`.
+
+With a VPS of your own:
+
+```sh
+npm install -g dsh-relay-server     # or just npx dsh-relay-server …
+dsh-relay-server --port 8889 --agent-port 9000 --data-dir ~/.dsh-relay
+npx dsh-relay-server tenant add --name alice --quota 50MB   # prints her key once
+```
+
+Ports, TLS and per-tenant limits are covered in [relay details](#relay-details-run-your-own).
+
+### ② Plugin: on the machine that runs DSH
+
+**Desktop app, no terminal needed:** open the **Plugins** page → **Add plugin** → type
+`dsh-relay-phone` in the package field → Enter → click **Enable now** → restart DSH when it asks
+(the plugin is host-side code).
+
+The same field takes a version (`dsh-relay-phone@0.11.10`), a git URL, a `.tgz` tarball or an
+absolute local path, and lets you pick the registry (npm or a mainland mirror). Other plugins
+update by uninstalling and reinstalling — there is no per-plugin "update" button.
+
+**From a terminal:**
+
+```sh
+dsh plugin --profile web add dsh-relay-phone
+```
+
+From a checkout, point at the package instead:
+
+```sh
+cd dsh-relay
+npm install --workspace dsh-relay-phone
+dsh plugin --profile web add link:./packages/plugin
+```
+
+### ③ Pair
+
+Sidebar **Phone Entry** → **Open console** → fill in the scheme, host, phone port, agent port and
+the key from step ① → save → scan the QR code.
+
+The console is **desktop-only**: it prints the pairing link, which carries the device key, so
+requests that arrive through the relay are refused. In the desktop app that button navigates
+same-origin, so the port does not matter; `dsh web` from a terminal prints the URL to append
+`/relay-bridge/panel` to.
+
+| Package | Runs on | Install | Upgrade |
+|---|---|---|---|
+| [`dsh-relay-server`](https://www.npmjs.com/package/dsh-relay-server) | your VPS | `npm install -g dsh-relay-server`, or just `npx dsh-relay-server` | `npm install -g dsh-relay-server@latest` |
+| [`dsh-relay-phone`](https://www.npmjs.com/package/dsh-relay-phone) | the DSH machine | Plugins page → Add plugin → `dsh-relay-phone`; from a terminal, `dsh plugin --profile web add dsh-relay-phone` | uninstall and reinstall (or rerun the command), then restart DSH |
+
+Requirements: Node ≥ 22 on the DSH machine (DSH ships one) and Node ≥ 18 for the relay; the relay
+needs a public IP and `openssl` (it generates the agents' self-signed certificate).
+`dsh-relay-server --version` prints the relay version; the console footer shows the plugin's.
+
+## Relay details (run your own)
+
+The relay only forwards bytes: plain HTTP on the phone side, WSS on the agent side (self-signed
+certificate, pinned on first connect).
+
+Open **two** ports: `8889` for phones and `9000` for agents. To terminate TLS in front of the phone
+port, either pass `--tls-cert/--tls-key` (the relay then speaks HTTPS/WSS directly) or run the
+included terminator behind a certificate you already have:
+
+```sh
+node packages/relay/src/tls-terminator.mjs --port 8443 --upstream 8889 --cert-dir /path/to/certs
+```
+
+⚠️ When a reverse proxy terminates TLS, start the relay with **`--host 127.0.0.1`**, or the
+plaintext phone port is exposed to the internet as well (and `?g=` travels in clear text). The agent
+listener has its own flag (`--agent-host`, default `0.0.0.0`) because outside agents must reach it.
+
+Run either process under systemd, `tmux`, or your supervisor of choice. State is the generated agent
+certificate plus `tenants.json` (keys as hashes, today's usage) in `~/.dsh-relay`.
+
+Started with no key and no tenants, the relay idles and says so. Give each person their own key
+(`npx dsh-relay-server …` works because the workspace is installed):
+
+```sh
+npx dsh-relay-server tenant add --name alice --quota 50MB --max-streams 32
+# → prints alice's key once; that value goes into her DSH panel
+```
+
+Each tenant is held to, in this order:
+
+1. **One agent at a time** — a second connection with the same key replaces the first.
+2. **Concurrent stream cap** (`--max-streams-default`, 32) — the phone gets a `429` past it.
+3. **Daily quota** (`--quota-default`, 50MB, UTC day) — cut at the limit, no re-registration until `tenant reset`.
+4. **Disabled flag** — refused at `hello`, before a challenge is issued.
+
+All of it is adjustable **while running**, no restart:
+
+```sh
+npx dsh-relay-server tenant list
+npx dsh-relay-server tenant set alice --quota 200MB --max-streams 64
+npx dsh-relay-server tenant set alice --max-streams 0        # unlimited
+npx dsh-relay-server tenant disable alice
+```
+
+`0` means unlimited for either limit. Every flag and subcommand: [the relay README](packages/relay/README.md).
+
+**For a relay other people use, also set a brake.** `--egress-limit 2GB` is a process-wide daily
+byte cap that does **not** depend on the ledger — the admin key's traffic counts too — and once the
+total crosses it, every connection is closed and the reason logged. Pick a number you would be
+willing to pay once, and neither a bug nor a forgotten tenant can turn into a surprise bandwidth
+bill:
+
+```sh
+npx dsh-relay-server --port 8889 --agent-port 9000 --egress-limit 2GB
+```
+
+**Single-user deployment**: no tenants at all, just one shared key. The admin path is not counted
+against a tenant quota and has no stream cap:
+
+```sh
+KEY="$(openssl rand -hex 24)"
+dsh-relay-server --port 8889 --agent-port 9000 --key "$KEY"
+```
+
 ## The problem
 
 DSH is a desktop harness: the agent runs on your machine, edits your files, and runs your commands. That is exactly what makes remote access awkward. You do not want to expose your laptop to the internet, you do not want your conversations sitting on someone else's server, and you do not want a mobile client that reimplements the agent.
@@ -79,129 +206,6 @@ The bridge dials **out** to the relay, so your machine needs no public port and 
 - **Without TLS in front of the relay, the HTML/JS shell is delivered in clear text.** Encrypted API data does not help if an active man-in-the-middle can serve you different JavaScript. Put the relay behind a domain with TLS (Caddy is one line), or use a private network such as Tailscale. The threat model is "passive network observers and a curious relay operator", not "an attacker who can rewrite your traffic".
 - The page shell is served by your own bridge over the relay, so anyone who can reach the relay *and* guess a device id still cannot pair without the PSK — but they will see the pairing page.
 - A phone that has paired stays paired for 30 days. Rotate the identity when a device is lost.
-
-## Install
-
-Both halves are published on npm. Nothing else is needed.
-
-| Package | Runs on | Install | Upgrade |
-|---|---|---|---|
-| [`dsh-relay-server`](https://www.npmjs.com/package/dsh-relay-server) | your VPS | `npm install -g dsh-relay-server` (or just `npx dsh-relay-server`) | `npm install -g dsh-relay-server@latest` |
-| [`dsh-relay-phone`](https://www.npmjs.com/package/dsh-relay-phone) | the machine running DSH | `dsh plugin --profile web add dsh-relay-phone` | same command again, then restart `dsh web` |
-
-Requirements: Node.js ≥ 22 where DSH runs, ≥ 18 on the relay, a machine with a public IP for the relay, and `openssl` on the relay host (for the self-signed agent certificate).
-
-```sh
-npx dsh-relay-server --version    # prints the relay version
-```
-
-The plugin is host-side code: after installing or upgrading it, restart `dsh web` and the panel footer shows the version it is running.
-
-## Quick start
-
-### 1. Relay server
-
-```sh
-npm install -g dsh-relay-server
-dsh-relay-server --port 8889 --agent-port 9000 --data-dir ~/.dsh-relay
-```
-
-Or without a global install, `npx dsh-relay-server@latest …` with the same flags.
-
-To run from a checkout instead:
-
-```sh
-git clone https://github.com/ebhrz/dsh-relay.git
-cd dsh-relay
-npm install
-node packages/relay/src/index.mjs --port 8889 --agent-port 9000 --data-dir ~/.dsh-relay
-```
-
-Open **two** ports: `8889` for phones and `9000` for agents. To terminate TLS in front of the phone port, either pass `--tls-cert/--tls-key` (the relay then speaks HTTPS/WSS directly) or run the included terminator behind a certificate you already have:
-
-```sh
-node packages/relay/src/tls-terminator.mjs --port 8443 --upstream 8889 --cert-dir /path/to/certs
-```
-
-⚠️ When a reverse proxy terminates TLS, start the relay with **`--host 127.0.0.1`**, or the plaintext phone port is exposed to the internet as well (and `?g=` travels in clear text). The agent listener has its own flag (`--agent-host`, default `0.0.0.0`) because outside agents must be able to reach it.
-
-Run either process under systemd, `tmux`, or your supervisor of choice. State is the generated agent certificate plus `tenants.json` (keys as hashes, today's usage) in `~/.dsh-relay`.
-
-Started with no key and no tenants, the relay idles and says so. Give each person their own key (`npx dsh-relay-server …` works because the workspace is installed):
-
-```sh
-npx dsh-relay-server tenant add --name alice --quota 50MB --max-streams 32
-# → prints alice's key once; that value goes into her DSH panel
-```
-
-Per tenant the relay enforces, in this order:
-
-1. **One agent at a time** — a second agent with the same key replaces the first.
-2. **A concurrent-stream cap** (`--max-streams-default`, 32) — past it the phone gets `429`.
-3. **A daily byte quota** (`--quota-default`, 50MB, UTC day) — the connection is cut at the limit and refused until the next day or `tenant reset`.
-4. **A disabled flag** — refused at `hello`, before any challenge.
-
-All of it is adjustable on a running server, no restart:
-
-```sh
-npx dsh-relay-server tenant list
-npx dsh-relay-server tenant set alice --quota 200MB --max-streams 64
-npx dsh-relay-server tenant set alice --max-streams 0        # unlimited
-npx dsh-relay-server tenant disable alice
-```
-
-`0` means unlimited for either limit. See [the relay README](packages/relay/README.md) for every flag and subcommand.
-
-**For a relay other people use, also set a brake.** `--egress-limit 2GB` is a process-wide daily cap that does not trust the per-tenant ledger: when the total crosses it, every connection is closed and the reason is logged. Pick a number you would be willing to pay for once, and a bug or a forgotten tenant cannot turn into a bandwidth bill:
-
-```sh
-npx dsh-relay-server --port 8889 --agent-port 9000 --egress-limit 2GB
-```
-
-**Single-user deployment.** Skip tenants entirely and keep one shared key; the admin path is never metered:
-
-```sh
-KEY="$(openssl rand -hex 24)"
-dsh-relay-server --port 8889 --agent-port 9000 --key "$KEY"
-```
-
-### 2. Local bridge
-
-**Desktop app, no terminal needed:** open the **Plugins** page → **Add plugin** → type
-`dsh-relay-phone` in the package field → Enter. Then click **Enable now** and restart
-DSH when it asks (the plugin is host-side code).
-
-The same field also takes a version (`dsh-relay-phone@0.11.10`), a git URL, a `.tgz`
-tarball or an absolute local path, and the dialog lets you pick the registry (npm or
-a mainland mirror). Other plugins update by uninstalling and reinstalling — there is
-no per-plugin "update" button.
-
-**From a terminal:**
-
-```sh
-dsh plugin --profile web add dsh-relay-phone
-```
-
-That installs the published package and registers its bundle. From a checkout, the same command with a path instead:
-
-```sh
-cd dsh-relay
-npm install --workspace dsh-relay-phone
-dsh plugin --profile web add link:./packages/plugin
-```
-
-Either way the plugin is host-side code, so **restart `dsh web`**.
-
-Open the relay console to fill it in (scheme, host, phone port `8889`, agent port `9000` and the key from step 1). Two ways:
-
-- **Desktop app**: the sidebar's **Phone Entry** card → **Open console**. It navigates same-origin inside the window, so **you never need the port**.
-- **`dsh web` from a terminal**: take the tokenised URL it prints and append `/relay-bridge/panel`.
-
-**Upgrading.** `npm install -g dsh-relay-server@latest` for the relay; run the same `dsh plugin … add dsh-relay-phone` command again for the plugin, then restart `dsh web`. Both print their version (`dsh-relay-server --version`, and the panel footer).
-
-### 3. Phone
-
-Scan the QR code in the panel. It opens the mobile page, pairs once, and stores the ticket. The full desktop UI stays reachable from the drawer ("Open full desktop UI") or at `/c/<id>/?desktop=1`.
 
 ## Configuration
 

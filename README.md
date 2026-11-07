@@ -9,9 +9,8 @@
 
 [English](README.en.md) | 简体中文
 
-> **免费试用**（不用先搭服务器）：打开 **<https://dshrelay.com:8443/>**，点一下就领一把
-> **50 MB/天** 的中继密钥，页面会实时显示今天还剩几把（每天 10 把，UTC 0 点重置）。
-> 额度不够或者想长期用，直接发邮件说明用途即可。
+> **免费试用，不用先搭服务器**：<https://dshrelay.com:8443/> 点一下领一把 50 MB/天的 key。
+> 两步装完就能扫码，见下面的[安装](#安装两步装完就能扫码)。
 
 <p align="center">
   <img src="docs/mobile/shots/mobile-01-chat.png" width="240" alt="聊天与工具卡片">
@@ -29,6 +28,122 @@
 - 聊天流式输出、工具卡片、审批、提问、图片附件、重命名和简易终端。
 
 ---
+
+## 安装（两步，装完就能扫码）
+
+> **不想自己搭中继**：先去 **<https://dshrelay.com:8443/>** 点一下，领一把 **50 MB/天** 的 key
+> ——每天 10 把，UTC 0 点重置，页面实时显示还剩几把——然后从第 ② 步开始。
+
+### ① 中继（relay）：用自己的服务器，或者跳过
+
+用上面的免费试用就**跳过这一步**，第 ③ 步填 `dshrelay.com` / `8443` / `9443` 就行。
+
+自己有 VPS 的话：
+
+```sh
+npm install -g dsh-relay-server     # 不想全局安装就用 npx dsh-relay-server …
+dsh-relay-server --port 8889 --agent-port 9000 --data-dir ~/.dsh-relay
+npx dsh-relay-server tenant add --name alice --quota 50MB   # 只打印一次 key
+```
+
+端口、TLS、租户上限这些细节在下面的[中继细节](#中继细节自建才需要)。
+
+### ② 插件（plugin）：跑 DSH 的那台电脑
+
+**桌面 App，不用命令行**：打开**插件**页 → 点「**添加插件**」→ 在包名框里输入
+`dsh-relay-phone` → 回车 → 点「**立即启用**」→ 按提示**重启 DSH**（插件是宿主侧代码）。
+
+这个框也接受带版本号（`dsh-relay-phone@0.11.10`）、Git 地址、`.tgz` 压缩包和本地绝对路径；
+安装源可选 npm 官方或大陆镜像。别的插件升级是「卸载再装」，没有单独的更新按钮。
+
+**命令行**：
+
+```sh
+dsh plugin --profile web add dsh-relay-phone
+```
+
+从仓库源码安装就把包名换成路径：
+
+```sh
+cd dsh-relay
+npm install --workspace dsh-relay-phone
+dsh plugin --profile web add link:./packages/plugin
+```
+
+### ③ 配对
+
+侧边栏「**手机入口**」→ 卡片里「**去控制台配置**」/「**打开完整控制台**」→ 填协议、地址、
+手机端口、agent 端口和第 ① 步的 key → 保存后扫码。
+
+面板是**桌面专用**的：它会打印带设备密钥的配对链接，所以走中继过来的请求一律拒绝。桌面 App
+里点那个按钮是同源跳转，**不需要知道端口**；命令行启动的 `dsh web` 用它打印的地址加
+`/relay-bridge/panel`。
+
+| 包 | 跑在哪 | 安装 | 升级 |
+|---|---|---|---|
+| [`dsh-relay-server`](https://www.npmjs.com/package/dsh-relay-server) | 你的 VPS | `npm install -g dsh-relay-server`，或直接用 `npx dsh-relay-server` | `npm install -g dsh-relay-server@latest` |
+| [`dsh-relay-phone`](https://www.npmjs.com/package/dsh-relay-phone) | 跑 DSH 的机器 | 插件页「添加插件」填 `dsh-relay-phone`；命令行是 `dsh plugin --profile web add dsh-relay-phone` | 卸载再装（或重复同一命令），然后重启 DSH |
+
+环境要求：跑 DSH 的机器 Node ≥ 22（DSH 自带），中继 Node ≥ 18；中继要有公网 IP，并且有 `openssl`
+（生成 agent 自签证书）。`dsh-relay-server --version` 打印中继版本，插件版本看面板页脚。
+
+## 中继细节（自建才需要）
+
+中继只做字节转发：手机侧是普通 HTTP，agent 侧是 WSS（自签证书，首个连接 TOFU 记住指纹）。
+
+开放**两个**端口：`8889` 给手机，`9000` 给 agent。要在手机侧终止 TLS，有两种方式：
+给中继传 `--tls-cert/--tls-key`（中继自己讲 HTTPS/WSS），或者用附带的终结器接你已有的证书：
+
+```sh
+node packages/relay/src/tls-terminator.mjs --port 8443 --upstream 8889 --cert-dir /path/to/certs
+```
+
+⚠️ 用反向代理终止 TLS 时，**给中继加 `--host 127.0.0.1`**，否则明文手机端口会一起暴露在公网
+（`?g=` 会明文走线）。agent 端口是另一个参数（`--agent-host`），默认 `0.0.0.0`——它必须让外面的
+agent 连进来。
+
+用 systemd / tmux / 你惯用的守护方式常驻即可。状态只有自动生成的 agent 证书和
+`tenants.json`（只存 key 的哈希和当天用量）。
+
+不带 `--key`、也还没建租户时，中继会空转并提示。给每个人发一把自己的 key：
+
+```sh
+npx dsh-relay-server tenant add --name alice --quota 50MB --max-streams 32
+# → 只打印一次 alice 的 key，填进她 DSH 面板的 relay key 字段
+```
+
+每个租户按顺序受这些约束：
+
+1. **同时只有一个 agent** —— 同一个 key 再连一条，旧的会被踢掉。
+2. **并发 stream 上限**（`--max-streams-default`，默认 32）—— 超了手机侧收到 `429`。
+3. **每日流量配额**（`--quota-default`，默认 50MB，按 UTC 日）—— 到量即断，当天不能再注册，除非 `tenant reset`。
+4. **停用标记** —— 在 `hello` 阶段就拒绝，连挑战都不发。
+
+全部可以在**运行中**调整，不需要重启：
+
+```sh
+npx dsh-relay-server tenant list
+npx dsh-relay-server tenant set alice --quota 200MB --max-streams 64
+npx dsh-relay-server tenant set alice --max-streams 0        # 不限
+npx dsh-relay-server tenant disable alice
+```
+
+两个上限都可以写 `0` 表示不限。完整参数和子命令见[中继的 README](packages/relay/README.md)。
+
+**要给别人用的中继，再加一道闸。** `--egress-limit 2GB` 是进程级的每日总字节上限，**不依赖租户
+账本**，admin key 的流量也计入：总量一到就断开所有连接并记录原因。挑一个「就算付一次也无所谓」的
+数字，那么无论是代码 bug 还是忘了删的租户，都不会变成一张意外的带宽账单：
+
+```sh
+npx dsh-relay-server --port 8889 --agent-port 9000 --egress-limit 2GB
+```
+
+**单人部署**：完全不用租户，只留一把共享 key；admin 路径不计租户流量、不限并发：
+
+```sh
+KEY="$(openssl rand -hex 24)"
+dsh-relay-server --port 8889 --agent-port 9000 --key "$KEY"
+```
 
 ## 要解决什么
 
@@ -86,131 +201,6 @@ dsh-relay 把它拆成三块：
 - 页面外壳由你自己的桥接端生成并经中继投送，所以即使有人能访问中继并猜到设备 id，没有 PSK 也无法完成配对，
   但会看到配对页。
 - 已配对的手机 30 天内保持有效。设备丢失时请轮换身份。
-
-## 安装
-
-两半都已发布到 npm，不需要克隆仓库。
-
-| 包 | 跑在哪 | 安装 | 升级 |
-|---|---|---|---|
-| [`dsh-relay-server`](https://www.npmjs.com/package/dsh-relay-server) | 你的 VPS | `npm install -g dsh-relay-server`（或直接用 `npx dsh-relay-server`） | `npm install -g dsh-relay-server@latest` |
-| [`dsh-relay-phone`](https://www.npmjs.com/package/dsh-relay-phone) | 跑 DSH 的机器 | `dsh plugin --profile web add dsh-relay-phone` | 再执行一次同样的命令，然后重启 `dsh web` |
-
-环境要求：跑 DSH 的机器 Node.js ≥ 22，中继 ≥ 18；中继需要有公网 IP；中继主机需要 `openssl`（生成 agent 自签证书）。
-
-```sh
-npx dsh-relay-server --version    # 打印中继版本
-```
-
-插件是宿主侧代码：装上或升级后都要重启 `dsh web`，面板页脚会显示实际在跑的版本。
-
-## 快速开始
-
-### ① 中继服务器
-
-```sh
-npm install -g dsh-relay-server
-dsh-relay-server --port 8889 --agent-port 9000 --data-dir ~/.dsh-relay
-```
-
-不想全局安装就用 `npx dsh-relay-server@latest …`，参数相同。
-
-从仓库源码跑也可以：
-
-```sh
-git clone https://github.com/ebhrz/dsh-relay.git
-cd dsh-relay
-npm install
-node packages/relay/src/index.mjs --port 8889 --agent-port 9000 --data-dir ~/.dsh-relay
-```
-
-开放**两个**端口：`8889` 给手机，`9000` 给 agent。要在手机侧终止 TLS，有两种方式：
-给中继传 `--tls-cert/--tls-key`（中继自己讲 HTTPS/WSS），或者用附带的终结器接你已有的证书：
-
-```sh
-node packages/relay/src/tls-terminator.mjs --port 8443 --upstream 8889 --cert-dir /path/to/certs
-```
-
-⚠️ 用反向代理终止 TLS 时，**给中继加 `--host 127.0.0.1`**，否则明文手机端口会一起暴露在公网
-（`?g=` 会明文走线）。agent 端口是另一个参数（`--agent-host`），默认 `0.0.0.0`——它必须让外面的
-agent 连进来。
-
-用 systemd / tmux / 你惯用的守护方式常驻即可。状态只有自动生成的 agent 证书和
-`tenants.json`（只存 key 的哈希和当天用量）。
-
-不带 `--key`、也还没建租户时，中继会空转并提示。给每个人发一把自己的 key：
-
-```sh
-npx dsh-relay-server tenant add --name alice --quota 50MB --max-streams 32
-# → 只打印一次 alice 的 key，填进她 DSH 面板的 relay key 字段
-```
-
-每个租户按顺序受这些约束：
-
-1. **同时只有一个 agent** —— 同一个 key 再连一条，旧的会被踢掉。
-2. **并发 stream 上限**（`--max-streams-default`，默认 32）—— 超了手机侧收到 `429`。
-3. **每日流量配额**（`--quota-default`，默认 50MB，按 UTC 日）—— 到量即断，当天不能再注册，除非 `tenant reset`。
-4. **停用标记** —— 在 `hello` 阶段就拒绝，连挑战都不发。
-
-全部可以在**运行中**调整，不需要重启：
-
-```sh
-npx dsh-relay-server tenant list
-npx dsh-relay-server tenant set alice --quota 200MB --max-streams 64
-npx dsh-relay-server tenant set alice --max-streams 0        # 不限
-npx dsh-relay-server tenant disable alice
-```
-
-两个上限都可以写 `0` 表示不限。完整参数和子命令见[中继的 README](packages/relay/README.md)。
-
-**要给别人用的中继，再加一道闸。** `--egress-limit 2GB` 是进程级的每日总字节上限，**不依赖租户账本**：
-总量一到就断开所有连接并记录原因。挑一个「就算付一次也无所谓」的数字，那么无论是代码 bug 还是
-忘了删的租户，都不会变成一张意外的带宽账单：
-
-```sh
-npx dsh-relay-server --port 8889 --agent-port 9000 --egress-limit 2GB
-```
-
-**单人部署**：完全不用租户，只留一把共享 key；admin 路径不计流量、不限并发：
-
-```sh
-KEY="$(openssl rand -hex 24)"
-dsh-relay-server --port 8889 --agent-port 9000 --key "$KEY"
-```
-
-### ② 本地桥接
-
-**桌面 App（不用命令行）**：打开**插件**页 → 点「**添加插件**」→ 在包名框里输入 `dsh-relay-phone` → 回车。
-装完点「**立即启用**」，按提示**重启 DSH**（插件是宿主侧代码）。
-
-这个框也接受带版本号（`dsh-relay-phone@0.11.10`）、Git 地址、`.tgz` 压缩包和本地绝对路径；安装源可以选
-npm 官方或大陆镜像。其他插件升级时要「卸载再装」，没有单独的"更新"按钮。
-
-**命令行**：
-
-```sh
-dsh plugin --profile web add dsh-relay-phone
-```
-
-从仓库源码安装就把包名换成路径：
-
-```sh
-cd dsh-relay
-npm install --workspace dsh-relay-phone
-dsh plugin --profile web add link:./packages/plugin
-```
-
-两种方式都是把插件 bundle 注册进 profile；插件是宿主侧代码，**需要重启 `dsh web`**。
-
-打开中继面板填配置（协议、地址、手机端口 `8889`、agent 端口 `9000`、第 ① 步的 Key），两条路都行：
-
-- **桌面 App**：侧边栏「手机入口」→ 卡片里「去控制台配置」/「打开完整控制台」。它走同源跳转，在同一个窗口里打开，**不需要知道端口**。
-- **命令行 `dsh web`**：用它启动时打印的带 token 地址，后面加 `/relay-bridge/panel`。
-
-### ③ 手机
-
-扫描面板里的二维码：打开手机页、完成一次配对、存下票据。桌面完整界面仍可从抽屉
-（「打开完整桌面界面」）或 `/c/<id>/?desktop=1` 进入。
 
 ## 配置
 
