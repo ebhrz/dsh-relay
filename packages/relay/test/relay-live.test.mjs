@@ -59,7 +59,13 @@ child.stderr.on('data', (chunk) => { output += chunk.toString() })
 const stop = () => { try { child.kill() } catch {} }
 
 try {
-  await waitFor(async () => output.includes('ready'), 'relay ready', 20000)
+  // "ready" is logged before the listeners bind: on Linux listen() is
+  // asynchronous, so connecting right after it races (ECONNREFUSED on CI).
+  await waitFor(
+    async () => output.includes('phone listener:') && output.includes('agent listener:'),
+    'relay listening',
+    20000,
+  )
 
   // ── register as the tenant ──────────────────────────────────────────
   const ws = new WebSocket(`wss://127.0.0.1:${agentPort}/agent`, { rejectUnauthorized: false })
@@ -373,7 +379,11 @@ try {
     brakeChild.stderr.on('data', (chunk) => { brakeLog += chunk.toString() })
 
     try {
-      await waitFor(async () => brakeLog.includes('ready'), 'brake relay ready', 20000)
+      await waitFor(
+        async () => brakeLog.includes('phone listener:') && brakeLog.includes('agent listener:'),
+        'brake relay listening',
+        20000,
+      )
       const brakeWs = new WebSocket(`wss://127.0.0.1:${brakeAgent}/agent`, { rejectUnauthorized: false })
       const brakeControl = []
       const brakeFrames = []

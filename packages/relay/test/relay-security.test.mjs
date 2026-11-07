@@ -51,7 +51,10 @@ async function startRelay(extraArgs = []) {
   let output = ''
   child.stdout.on('data', (chunk) => { output += chunk })
   child.stderr.on('data', (chunk) => { output += chunk })
-  await waitFor(() => output.includes('ready'), 'relay ready', 20000)
+  // "ready" is logged before the listeners bind, so on Linux (where listen() is
+  // asynchronous) waiting for it races with the first connect. Wait for both
+  // listeners to announce themselves instead.
+  await waitFor(() => output.includes('phone listener:') && output.includes('agent listener:'), 'relay listening', 20000)
 
   const relay = {
     dir,

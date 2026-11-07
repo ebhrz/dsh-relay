@@ -1035,13 +1035,23 @@ tenantStore = new TenantStore(path.join(args.dataDir, 'tenants.json'), {
   maxStreamsDefault: args.maxStreamsDefault,
 })
 const tls = ensureSelfSignedCert(args)
-startPhoneListener(args)
-startAgentListener(args, tls)
+const phoneServer = startPhoneListener(args)
+const agentServer = startAgentListener(args, tls)
 const tenantCount = tenantStore.list().length
-log(`dsh-relay-server ${VERSION} ready (${tenantCount} tenant${tenantCount === 1 ? '' : 's'}${args.key ? ' + admin key' : ''})`)
-if (!tenantCount && !args.key) {
-  log('warning: no tenants and no --key — nobody can register. Try: dsh-relay-server tenant add --name <name>')
+// Announce readiness only once both listeners are actually accepting: scripts
+// (and the test suite) treat this line as "connect now", and on Linux listen()
+// completes asynchronously.
+let pending = 2
+const announce = () => {
+  pending -= 1
+  if (pending > 0) return
+  log(`dsh-relay-server ${VERSION} ready (${tenantCount} tenant${tenantCount === 1 ? '' : 's'}${args.key ? ' + admin key' : ''})`)
+  if (!tenantCount && !args.key) {
+    log('warning: no tenants and no --key — nobody can register. Try: dsh-relay-server tenant add --name <name>')
+  }
 }
+phoneServer.once('listening', announce)
+agentServer.once('listening', announce)
 
 // One `stat` per second so a key created by the CLI works on the next attempt.
 // (A signal would be cheaper but SIGHUP does not exist on Windows, and this box
