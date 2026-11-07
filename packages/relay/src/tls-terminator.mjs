@@ -154,19 +154,34 @@ function start() {
   server.on('error', (e) => { log('server error', e.message); process.exit(1) })
 }
 
-// Hot reload: rebuild the server when the certificate files are replaced.
+// Hot reload, without dropping anyone.
+//
+// The old version closed the listener and called closeAllConnections() two
+// seconds later, so a renewal cut every live phone stream — and a certificate
+// file that failed to parse took the whole listener down with it. setSecureContext
+// swaps the certificate for *new* handshakes only; established tunnels keep the
+// context they negotiated with, and a failed load keeps the previous one.
 setInterval(() => {
   try {
-    if (stamp() !== certMtime) {
-      log('cert change detected, reloading...')
-      const old = server
-      old.close(() => {})
-      setTimeout(() => {
-        try { old.closeAllConnections() } catch {}
-      }, 2000)
-      start()
+    if (stamp() === certMtime) return
+    let certs
+    try {
+      certs = loadCerts()
+    } catch (error) {
+      log(`cert reload failed, keeping the current certificate: ${error.message}`)
+      return
     }
-  } catch {}
-}, 60 * 1000)
+    try {
+      server.setSecureContext(certs)
+    } catch (error) {
+      log(`cert reload rejected, keeping the current certificate: ${error.message}`)
+      return
+    }
+    certMtime = stamp()
+    log('certificate reloaded for new connections (established ones kept)')
+  } catch (error) {
+    log(`cert watch error: ${error.message}`)
+  }
+}, Number(process.env.DSH_RELAY_CERT_POLL_MS ?? 60_000))
 
 start()
