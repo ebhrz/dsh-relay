@@ -741,7 +741,14 @@ function startAgentListener(args, tls) {
           }
           helloGate = msg.gate
           pendingChallenge = crypto.randomBytes(24).toString('hex')
-          ws.send(JSON.stringify({ t: 'challenge', nonce: pendingChallenge }))
+          // Tell the client how the proof is keyed. A tenant key is never stored
+          // (only sha256(key)), so its proof must be keyed by that hash; the
+          // legacy admin --key is compared against the key itself. Clients that
+          // predate this field assume the admin derivation, which is what they
+          // already did.
+          const challengeTenant = helloKeyId ? (tenantStore?.byKeyId(helloKeyId) ?? null) : null
+          const mode = challengeTenant || !args.key ? 'tenant' : 'admin'
+          ws.send(JSON.stringify({ t: 'challenge', nonce: pendingChallenge, mode }))
           return
         }
 

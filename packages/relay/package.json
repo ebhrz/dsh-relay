@@ -1,6 +1,6 @@
 {
   "name": "dsh-relay-server",
-  "version": "0.6.2",
+  "version": "0.7.0",
   "description": "Zero-knowledge relay for dsh-relay-phone: no accounts, no database, routes end-to-end encrypted streams by device id.",
   "type": "module",
   "bin": {
@@ -14,7 +14,7 @@
     "start": "node src/index.mjs",
     "start:tls": "node src/tls-terminator.mjs",
     "check": "node --check src/index.mjs && node --check src/tls-terminator.mjs",
-    "test": "node test/tenants.test.mjs && node test/relay-live.test.mjs && node test/relay-security.test.mjs"
+    "test": "node test/tenants.test.mjs && node test/relay-live.test.mjs && node test/relay-security.test.mjs && node test/plugin-relay.test.mjs"
   },
   "keywords": [
     "deepseek-harness",
