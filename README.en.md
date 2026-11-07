@@ -64,6 +64,7 @@ The bridge dials **out** to the relay, so your machine needs no public port and 
 |---|---|
 | Relay abuse | Server starts with `--key`; an agent must prove knowledge of it with an HMAC challenge-response before registering |
 | Per-user limits | Each tenant key has one agent slot, a concurrent-stream cap (`429` past it), and a daily byte quota that cuts the connection at the limit |
+| Tenant isolation | A stream id is only valid on the connection that opened it: one tenant's agent cannot write into another tenant's phone stream or close it. Device ids are tenant-scoped, so two users may pick the same one |
 | Scanner noise | Phone URLs carry `?g=<gate>`, derived from the device PSK; the relay drops requests without it before they reach your machine |
 | Phone ↔ desktop auth | The QR fragment carries the PSK; a two-step challenge-response (replay-resistant) exchanges it for an encrypted ticket cookie valid for 30 days |
 | Confidentiality | Every API request/response body and WebSocket frame is sealed with a key derived from the PSK (`tweetnacl` secretbox) |
@@ -121,6 +122,8 @@ Open **two** ports: `8889` for phones and `9000` for agents. To terminate TLS in
 ```sh
 node packages/relay/src/tls-terminator.mjs --port 8443 --upstream 8889 --cert-dir /path/to/certs
 ```
+
+⚠️ When a reverse proxy terminates TLS, start the relay with **`--host 127.0.0.1`**, or the plaintext phone port is exposed to the internet as well (and `?g=` travels in clear text). The agent listener has its own flag (`--agent-host`, default `0.0.0.0`) because outside agents must be able to reach it.
 
 Run either process under systemd, `tmux`, or your supervisor of choice. State is the generated agent certificate plus `tenants.json` (keys as hashes, today's usage) in `~/.dsh-relay`.
 

@@ -34,6 +34,10 @@ import {
 // log claiming an older build.
 const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
 
+// How much unread data a phone may accumulate before its stream is dropped.
+// Bounds relay memory when a client opens a stream and stops reading.
+const MAX_PHONE_BACKLOG = 4 * 1024 * 1024
+
 function parseArgs(argv) {
   const args = {
     host: '0.0.0.0',
@@ -44,6 +48,8 @@ function parseArgs(argv) {
     quotaDefault: DEFAULT_QUOTA_BYTES,
     maxStreamsDefault: DEFAULT_MAX_STREAMS,
     egressLimit: 0, // 0 = no process-wide brake
+    maxConnections: 512, // per listener; 0 = unlimited
+    preAuthTimeoutMs: 15_000, // a client must send a request line within this
     dataDir: path.join(os.homedir(), '.dsh-relay'),
     tlsCert: null,
     tlsKey: null,
@@ -84,6 +90,18 @@ function parseArgs(argv) {
         args.egressLimit = parsed
         break
       }
+      case '--max-connections': {
+        const parsed = Number(next())
+        if (!Number.isInteger(parsed) || parsed < 0) fail('bad --max-connections (0 = unlimited)')
+        args.maxConnections = parsed
+        break
+      }
+      case '--pre-auth-timeout': {
+        const parsed = Number(next())
+        if (!Number.isInteger(parsed) || parsed < 1000) fail('bad --pre-auth-timeout (milliseconds, >= 1000)')
+        args.preAuthTimeoutMs = parsed
+        break
+      }
       case '--data-dir': args.dataDir = next(); break
       case '--tls-cert': args.tlsCert = next(); break
       case '--tls-key': args.tlsKey = next(); break
@@ -107,12 +125,18 @@ function usage() {
 
   --port <n>          HTTP listener for phones (default 8889)
   --agent-port <n>    WSS listener for agents (default port+1)
-  --host <addr>       bind address (default 0.0.0.0)
+  --host <addr>       bind address for the PHONE listener (default 0.0.0.0;
+                      put it behind a TLS proxy and use 127.0.0.1)
+  --agent-host <addr> bind address for the AGENT listener (default 0.0.0.0:
+                      agents dial in from outside)
   --key <secret>      admin registration key (optional; tenants are the normal path)
   --quota-default <n> daily quota for new tenants (default 50MB; 0 = unlimited)
   --max-streams-default <n> concurrent streams per tenant (default 32; 0 = unlimited)
-  --egress-limit <n>  process-wide daily byte brake across all tenants
-                      (default 0 = off; e.g. 2GB for a hosted demo)
+  --egress-limit <n>  process-wide daily byte brake across all connections,
+                      admin key included (default 0 = off; e.g. 2GB for a demo)
+  --max-connections <n> socket cap per listener (default 512; 0 = unlimited)
+  --pre-auth-timeout <ms> drop a phone connection that sends no request line
+                      within this window (default 15000)
   --tls-cert <pem>    custom TLS cert for the agent listener (default: auto
                       self-signed into --data-dir)
   --tls-key <pem>     custom TLS key for the agent listener
@@ -203,15 +227,23 @@ class AgentEntry {
   constructor(ws, gate, tenant = null, id = '') {
     this.ws = ws
     this.gate = gate // hex string supplied by the agent (derived from its PSK)
-    this.streams = new Set() // sids
+    this.streams = new Set() // sids owned by this connection
     this.alive = true
     this.tenant = tenant // null for the legacy admin --key
     this.quotaTripped = false
     this.id = id
+    this.key = '' // registry key: tenant-scoped, so two tenants can reuse a device id
   }
 }
 
-const agents = new Map() // id -> AgentEntry
+/**
+ * Agents are registered per (tenant, device id), not per device id. Two tenants
+ * may legitimately pick the same 8-character id; keying only by id let one of
+ * them knock the other's connection offline and made the phone dispatch
+ * ambiguous.
+ */
+const agents = new Map() // `${tenantId}:${deviceId}` -> AgentEntry
+const deviceIndex = new Map() // deviceId -> Set of registry keys
 const phoneByStream = new Map() // sid -> PhoneConn
 const tenantAgent = new Map() // tenant id -> { id, entry }
 /**
@@ -225,6 +257,40 @@ const blockedDevices = new Map() // device id -> { reason, day }
 let tenantStore = null // set in main()
 let nextSid = 1
 
+function agentKey(tenant, id) {
+  return `${tenant ? tenant.id : '*admin*'}:${id}`
+}
+
+function indexEntry(entry) {
+  agents.set(entry.key, entry)
+  let set = deviceIndex.get(entry.id)
+  if (!set) {
+    set = new Set()
+    deviceIndex.set(entry.id, set)
+  }
+  set.add(entry.key)
+}
+
+function forgetEntry(entry) {
+  agents.delete(entry.key)
+  const set = deviceIndex.get(entry.id)
+  if (!set) return
+  set.delete(entry.key)
+  if (set.size === 0) deviceIndex.delete(entry.id)
+}
+
+/** Every live agent claiming this device id (one per tenant at most). */
+function entriesForDevice(id) {
+  const keys = deviceIndex.get(id)
+  if (!keys) return []
+  const out = []
+  for (const key of keys) {
+    const entry = agents.get(key)
+    if (entry) out.push(entry)
+  }
+  return out
+}
+
 /**
  * Process-wide egress fail-safe. Per-tenant quotas are the policy; this is the
  * brake that does not depend on the ledger being right — if the whole process
@@ -233,16 +299,32 @@ let nextSid = 1
  */
 let egressDay = ''
 let egressBytes = 0
+let egressTripped = false
 
 function chargeEgress(bytes) {
-  if (!(bytes > 0)) return false
+  if (!(bytes > 0)) return egressTripped
   const day = quotaDayNow()
   if (egressDay !== day) {
+    // A new day gets a fresh budget, including the latch: otherwise the brake
+    // would fire once per process lifetime and stay silent forever after.
     egressDay = day
     egressBytes = 0
+    egressTripped = false
   }
   egressBytes += bytes
-  return args.egressLimit > 0 && egressBytes >= args.egressLimit
+  const over = args.egressLimit > 0 && egressBytes >= args.egressLimit
+  if (over && !egressTripped) {
+    egressTripped = true
+    log(`egress limit reached: ${formatBytes(egressBytes)} today >= ${formatBytes(args.egressLimit)}; closing every connection`)
+    for (const live of agents.values()) closeEntry(live, 'egress-limit')
+    tenantStore?.saveIfDirty()
+  }
+  return over
+}
+
+/** True while the brake is holding everything shut for today. */
+function egressBlocked() {
+  return egressTripped && egressDay === quotaDayNow()
 }
 
 
@@ -276,27 +358,23 @@ function closeEntry(entry, reason) {
 /**
  * Book bytes against the tenant's day and cut the connection the moment the
  * quota is reached — once, not on every later frame.
+ *
+ * The process-wide brake is charged first and for every entry, including the
+ * admin --key path that has no tenant record: the README promises that it
+ * counts every byte the relay carries, and an unmetered admin path would make
+ * that promise false exactly where a cloud bill is at stake.
  */
 function charge(entry, bytes) {
+  if (!(bytes > 0)) return
   const tenant = entry?.tenant
-  if (!tenant || !tenantStore || !(bytes > 0)) return
-  const { over } = tenantStore.charge(tenant, bytes)
-  if (chargeEgress(bytes)) {
-    if (!egressTripped) {
-      egressTripped = true
-      log(`egress limit reached: ${formatBytes(egressBytes)} today >= ${formatBytes(args.egressLimit)}; closing every connection`)
-      for (const live of agents.values()) closeEntry(live, 'egress-limit')
-      tenantStore.saveIfDirty()
-    }
-  }
+  const over = tenant && tenantStore ? tenantStore.charge(tenant, bytes).over : false
+  if (chargeEgress(bytes)) return
   if (!over || entry.quotaTripped) return
   entry.quotaTripped = true
   log(`quota exhausted tenant=${tenant.id} used=${formatBytes(tenant.usedBytesDay)} limit=${formatBytes(tenant.quotaBytesDay)}`)
   tenantStore.saveIfDirty()
   closeEntry(entry, 'quota-exceeded')
 }
-
-let egressTripped = false
 
 function sidPrefix(sid) {
   const b = Buffer.alloc(4)
@@ -346,6 +424,14 @@ class PhoneConn {
 
   sendToClient(chunk) {
     if (this.closed) return
+    // A phone that opens a stream and then never reads must not make the relay
+    // buffer it forever: past this much pending data the stream is dropped and
+    // the agent is told, which is what a stalled HTTP client deserves.
+    if (this.socket.writableLength > MAX_PHONE_BACKLOG) {
+      log(`phone-backlog sid=${this.sid} pending=${this.socket.writableLength} -> closing`)
+      this.destroy(true)
+      return
+    }
     this.socket.write(chunk)
   }
 
@@ -375,15 +461,26 @@ function startPhoneListener(args) {
   // Plain HTTP by design: in the TLS deployment a reverse proxy (Caddy with
   // automatic Let's Encrypt) terminates TLS in front of this port.
   const server = net.createServer((socket) => handlePhoneSocket(args, socket))
+  // Bound the socket count: without this an unauthenticated client can open
+  // connections until file descriptors run out.
+  if (args.maxConnections > 0) server.maxConnections = args.maxConnections
 
   server.listen(args.port, args.host, () => {
-    log(`phone listener: http://${args.host}:${args.port}/c/<id>/?g=<gate>`)
+    log(`phone listener: http://${args.host}:${args.port}/c/<id>/?g=<gate> (max ${args.maxConnections} conns)`)
   })
   return server
 }
 
 function handlePhoneSocket(args, socket) {
   socket.setNoDelay(true)
+  // Nothing is authenticated until a request line arrives, and the concurrency
+  // cap only applies after that: a client that connects and stays silent would
+  // otherwise hold a descriptor forever (slowloris).
+  socket.setTimeout(args.preAuthTimeoutMs, () => {
+    if (socket.destroyed) return
+    log('phone-timeout: no complete request line, closing')
+    socket.destroy()
+  })
     let buffer = Buffer.alloc(0)
 
     const onFirstLine = (line, gateCookie, fullHead) => {
@@ -408,7 +505,7 @@ function handlePhoneSocket(args, socket) {
       let rawQuery = q === -1 ? '' : target.slice(q + 1)
 
       if (rawPath === '/' || rawPath === '/healthz') {
-        return tinyResponse(socket, 200, 'OK', `dsh-relay-server ${VERSION} running\n`)
+        return tinyResponse(socket, 200, 'OK', 'dsh-relay-server running\n')
       }
       let m = rawPath.match(/^\/c\/([A-Za-z0-9]{4,16})(\/.*)?$/)
       if (!m && fullHead) {
@@ -419,8 +516,10 @@ function handlePhoneSocket(args, socket) {
         const cid = cookieLine ? /(?:^|;\s*)__relay_i=([A-Za-z0-9]{4,16})(?:;|$)/.exec(cookieLine[1])?.[1] : ''
         const cgate = cookieLine ? /(?:^|;\s*)__relay_g=([a-f0-9]{16,128})(?:;|$)/.exec(cookieLine[1])?.[1] : ''
         if (cid && cgate) {
-          const centry = agents.get(cid)
-          if (centry && timingSafeEqual(cgate, centry.gate)) {
+          // Several tenants may use the same device id, so the cookie gate
+          // decides which one this browser belongs to.
+          const centry = entriesForDevice(cid).find((candidate) => timingSafeEqual(cgate, candidate.gate))
+          if (centry) {
             const rewritten = `/c/${cid}${rawPath === '' ? '/' : rawPath}`
             const rQuery = rawQuery === '' ? '' : `?${rawQuery}`
             line = `${line.slice(0, sp + 1)}${rewritten}${rQuery} ${line.slice(sp2 + 1)}`
@@ -447,8 +546,12 @@ function handlePhoneSocket(args, socket) {
           `dsh-relay: unknown path ${rawPath}. Phones open /c/<id>/?g=<gate> links from the dsh-relay-phone settings page.\n`)
       }
       const id = m[1]
-      const entry = agents.get(id)
-      if (!entry) {
+      if (egressBlocked()) {
+        return tinyResponse(socket, 503, 'Service Unavailable',
+          'dsh-relay: the whole relay has used up its daily traffic budget. It resets at 00:00 UTC.\n')
+      }
+      const candidates = entriesForDevice(id)
+      if (!candidates.length) {
         // A device that was cut on purpose gets the real reason; anything else
         // is simply not connected right now.
         const blocked = blockedDevices.get(id)
@@ -471,8 +574,13 @@ function handlePhoneSocket(args, socket) {
       }
       const params = new URLSearchParams(rawQuery)
       const gate = params.get('g') ?? gateCookie
-      if (!gate || !/^[a-f0-9]{16,128}$/.test(gate) || !timingSafeEqual(gate, entry.gate)) {
-        log(`403 id=${id} gateLen=${gate.length} cookieGate=${(gateCookie || '').slice(0, 8)} entryGate=${entry.gate.slice(0, 8)} match=${gate === entry.gate}`)
+      // The gate names the deployment; with tenant-scoped registrations the same
+      // device id can exist in several tenants, and the gate picks the right one.
+      const entry = /^[a-f0-9]{16,128}$/.test(gate ?? '')
+        ? candidates.find((candidate) => timingSafeEqual(gate, candidate.gate))
+        : null
+      if (!entry) {
+        log(`403 id=${id} candidates=${candidates.length} gatePresent=${Boolean(gate)}`)
         return tinyResponse(socket, 403, 'Forbidden', 'dsh-relay: bad gate.\n')
       }
       // Concurrency cap: one stream is one phone socket held open on this box.
@@ -488,6 +596,9 @@ function handlePhoneSocket(args, socket) {
       entry.streams.add(sid)
       const firstBytes = fullHead ?? Buffer.from(`${line}\r\n`, 'latin1')
       log(`phone-start sid=${sid} firstLine=${JSON.stringify(firstBytes.subarray(0, 90).toString('latin1').split('\\r\\n')[0])}`)
+      // The request is in and the stream is bridged: the pre-auth deadline is
+      // gone, a long-lived streaming response is normal from here on.
+      socket.setTimeout(0)
       phoneByStream.set(sid, new PhoneConn(socket, entry, sid, firstBytes, remainderBytes))
     }
 
@@ -550,6 +661,11 @@ function startAgentListener(args, tls) {
       res.end('dsh-relay agent endpoint: connect with wss:// and register\n')
     },
   )
+  // Two bounds a TLS listener needs: connections whose handshake never
+  // completes, and the total socket count.
+  if (args.maxConnections > 0) server.maxConnections = args.maxConnections
+  server.headersTimeout = Math.max(args.preAuthTimeoutMs, 5000)
+  server.requestTimeout = args.preAuthTimeoutMs * 2
   const wss = new WebSocketServer({ noServer: true })
 
   server.on('upgrade', (req, socket, head) => {
@@ -595,6 +711,9 @@ function startAgentListener(args, tls) {
           // A key may have been created a moment ago by the CLI; pick it up now
           // rather than making the first connection attempt wait for the timer.
           tenantStore?.reloadIfChanged()
+          // The daily brake stays shut for the rest of the UTC day: a reconnect
+          // after the cut must not slip back in and keep the meter running.
+          if (egressBlocked()) return failConn('egress-limit')
           id = String(msg.id ?? '')
           if (!/^[A-Za-z0-9]{4,16}$/.test(id)) return failConn('bad id')
           if (typeof msg.gate !== 'string' || !/^[a-f0-9]{16,128}$/.test(msg.gate)) {
@@ -649,22 +768,26 @@ function startAgentListener(args, tls) {
             if (current && current.entry !== entry) {
               log(`tenant ${tenant.id}: replacing agent ${current.id} with ${id}`)
               closeEntry(current.entry, 'replaced')
-              if (agents.get(current.id) === current.entry) agents.delete(current.id)
+              if (agents.get(current.entry.key) === current.entry) forgetEntry(current.entry)
             }
           }
-          const previous = agents.get(id)
+          // The registry is tenant-scoped, so two tenants may use the same
+          // device id without evicting each other; only the same tenant
+          // reconnecting with the same id replaces its own previous entry.
+          const key = agentKey(tenant, id)
+          const previous = agents.get(key)
           if (previous) {
-            // Same id reconnecting: replace the old connection cleanly.
             previous.alive = false
             for (const sid of [...previous.streams]) {
               const phone = phoneByStream.get(sid)
-              if (phone) phone.destroy(false)
+              if (phone && phone.entry === previous) phone.destroy(false)
             }
             try { previous.ws.terminate() } catch {}
-            agents.delete(id)
+            forgetEntry(previous)
           }
           entry = new AgentEntry(ws, helloGate, tenant, id)
-          agents.set(id, entry)
+          entry.key = key
+          indexEntry(entry)
           blockedDevices.delete(id)
           if (tenant) {
             tenantAgent.set(tenant.id, { id, entry })
@@ -679,9 +802,13 @@ function startAgentListener(args, tls) {
 
         if (msg.t === 'close' && entry && registered) {
           const sid = msg.sid >>> 0
+          // Ownership check: a stream id belongs to the connection that opened
+          // it. Without this, any tenant could close another tenant's phone
+          // stream by guessing a sequential sid.
+          if (!entry.streams.has(sid)) return
           entry.streams.delete(sid)
           const phone = phoneByStream.get(sid)
-          if (phone) phone.destroy(false)
+          if (phone && phone.entry === entry) phone.destroy(false)
           return
         }
         return
@@ -692,17 +819,20 @@ function startAgentListener(args, tls) {
       charge(entry, data.length)
       if (!entry.alive) return
       const sid = data.readUInt32BE(0)
+      // Same ownership check as above: never write into another tenant's phone
+      // socket, whatever sid the frame claims.
+      if (!entry.streams.has(sid)) return
       const phone = phoneByStream.get(sid)
-      if (phone) phone.sendToClient(data.subarray(4))
+      if (phone && phone.entry === entry) phone.sendToClient(data.subarray(4))
     })
 
     ws.on('close', () => {
       clearInterval(heartbeat)
-      if (entry && agents.get(id) === entry) {
-        agents.delete(id)
+      if (entry && agents.get(entry.key) === entry) {
+        forgetEntry(entry)
         for (const sid of [...entry.streams]) {
           const phone = phoneByStream.get(sid)
-          if (phone) phone.destroy(false)
+          if (phone && phone.entry === entry) phone.destroy(false)
         }
         if (entry.tenant && tenantAgent.get(entry.tenant.id)?.entry === entry) {
           tenantAgent.delete(entry.tenant.id)

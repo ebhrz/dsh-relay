@@ -27,11 +27,14 @@ State lives in `--data-dir` (default `~/.dsh-relay`): the generated agent certif
 |---|---|---|
 | `--port` | `8889` | HTTP listener for phones |
 | `--agent-port` | `port + 1` | WSS listener for agents |
-| `--host` | `0.0.0.0` | bind address for both listeners |
+| `--host` | `0.0.0.0` | bind address for the **phone** listener; behind a TLS proxy use `127.0.0.1` |
+| `--agent-host` | `0.0.0.0` | bind address for the **agent** listener (agents dial in from outside) |
+| `--max-connections` | `512` | socket cap per listener; `0` = unlimited |
+| `--pre-auth-timeout` | `15000` | drop a phone connection that sends no request line within this many ms |
 | `--key` | — | optional admin key (single-user mode; never metered) |
 | `--quota-default` | `50MB` | daily quota applied to tenants created without `--quota`; `0` = unlimited |
 | `--max-streams-default` | `32` | concurrent streams for tenants created without `--max-streams`; `0` = unlimited |
-| `--egress-limit` | `0` (off) | process-wide daily byte brake across **all** tenants; when reached, every connection is closed |
+| `--egress-limit` | `0` (off) | process-wide daily byte brake across **all** connections, admin key included; when reached, every connection is closed for the rest of the UTC day |
 | `--tls-cert` / `--tls-key` | auto | agent TLS material; a self-signed pair is generated into `--data-dir` on first run |
 | `--data-dir` | `~/.dsh-relay` | certificate plus ledger directory |
 | `--version` | — | print the version and exit |
@@ -111,6 +114,24 @@ out. On a cloud host this is also what keeps a bug or a forgotten tenant from
 turning into a bandwidth bill: pick a number you are happy to pay for once, and
 the relay cannot exceed it in a day. `0`, the default, disables the brake — right
 for a personal relay where you are the only tenant.
+
+The brake covers **every** registered connection, including an agent using the
+admin `--key`, and it stays shut for the rest of the UTC day: a reconnect after
+the cut is refused at `hello` instead of quietly resuming the meter.
+
+### Isolation between tenants
+
+Streams are numbered per relay but checked per connection: an agent may only
+write to, or close, a stream that its own connection opened, so one tenant cannot
+inject bytes into another tenant's phone (that would be script execution on a
+shared origin) or cut it off. Device ids are scoped per tenant as well, so two
+users may pick the same eight characters without evicting each other; the phone's
+`?g=` gate selects which of them it belongs to.
+
+Unauthenticated sockets are bounded too: a phone connection that sends no request
+line within `--pre-auth-timeout` is dropped, each listener accepts at most
+`--max-connections`, and a phone that stops reading is disconnected once the
+relay has 4 MB queued for it.
 
 Every byte that crosses the relay is counted, including the request line and
 headers that arrive with the first packet of a request, in both directions.

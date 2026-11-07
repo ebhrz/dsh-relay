@@ -67,6 +67,7 @@ dsh-relay 把它拆成三块：
 |---|---|
 | 防中继被白嫖 | 中继以 `--key` 启动，agent 注册需 HMAC 挑战-应答证明 |
 | 每用户限额 | 每把租户 key 一个 agent 名额、一个并发 stream 上限（超了 `429`）、一个每日流量配额（到量即断） |
+| 租户隔离 | 流 id 按连接校验：一个租户的 agent 不能往别人的手机流里写字节、也不能关掉它；设备 id 按租户区分，两人撞名互不影响 |
 | 防扫描打扰 | 手机 URL 携带 `?g=<gate>`（由 PSK 派生），中继校验通过才转发到你的机器 |
 | 手机↔电脑认证 | 二维码 fragment 携带 PSK，两步挑战-应答（防重放）换取密文 cookie，有效期 30 天 |
 | 数据机密性 | 由 PSK 派生信封密钥，所有 API 请求/响应体 + WS 帧用 tweetnacl secretbox 密封 |
@@ -129,6 +130,10 @@ node packages/relay/src/index.mjs --port 8889 --agent-port 9000 --data-dir ~/.ds
 ```sh
 node packages/relay/src/tls-terminator.mjs --port 8443 --upstream 8889 --cert-dir /path/to/certs
 ```
+
+⚠️ 用反向代理终止 TLS 时，**给中继加 `--host 127.0.0.1`**，否则明文手机端口会一起暴露在公网
+（`?g=` 会明文走线）。agent 端口是另一个参数（`--agent-host`），默认 `0.0.0.0`——它必须让外面的
+agent 连进来。
 
 用 systemd / tmux / 你惯用的守护方式常驻即可。状态只有自动生成的 agent 证书和
 `tenants.json`（只存 key 的哈希和当天用量）。
