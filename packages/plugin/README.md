@@ -6,6 +6,10 @@ It owns the device identity, the outbound connection to [`dsh-relay-server`](../
 
 Part of [dsh-relay](https://github.com/ebhrz/dsh-relay). Read the [main README](https://github.com/ebhrz/dsh-relay#readme) for the architecture, security model and deployment steps.
 
+**Try it without running a relay:** <https://dshrelay.com:8443/> hands out a free
+50 MB/day key (10 a day, resets at 00:00 UTC). Self-hosting is free too — that is
+what the rest of this repository is for.
+
 ## Install
 
 ```sh

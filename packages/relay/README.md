@@ -4,6 +4,10 @@ A zero-knowledge relay for [`dsh-relay-phone`](../plugin): it pairs a phone conn
 
 Part of [dsh-relay](https://github.com/ebhrz/dsh-relay). Read the [main README](https://github.com/ebhrz/dsh-relay#readme) for the architecture and security model.
 
+**Hosted demo:** <https://dshrelay.com:8443/> issues a free 50 MB/day key per
+visitor (10 a day, reset at 00:00 UTC). Handy to try the stack before deploying
+your own relay.
+
 ## Run
 
 ```sh
