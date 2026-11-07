@@ -84,13 +84,49 @@ requests that arrive through the relay are refused. In the desktop app that butt
 same-origin, so the port does not matter; `dsh web` from a terminal prints the URL to append
 `/relay-bridge/panel` to.
 
+### Headless server (no desktop, no browser)
+
+DSH is a Node service: `dsh web` binds loopback and never touches a display, so a remote box, a
+container or a NAS runs it fine.
+
+```sh
+npm install -g @deepseek-ai/dsh           # needs Node ≥ 24.9
+dsh web --host 127.0.0.1 --port 3080 --no-open
+```
+
+`--host` refuses wildcard addresses on purpose: to reach it from outside, either put the relay in
+front (below) or forward the port with `ssh -L 3080:127.0.0.1:3080 server`.
+
+Nobody can click a panel on a headless box, so configure the plugin by writing a file (either one,
+no browser needed):
+
+```sh
+# A. the profile config layer, read by the plugin at boot
+~/.dsh/profiles/web/cordis.patch.yml
+- id: relay-bridge
+  config: { relayScheme: https, relayHost: example.com, relayPort: 8443,
+            agentPort: 9443, relayKey: "<key>", autoStart: true }
+
+# B. the same file the console writes
+~/.dsh/plugin-data/dsh-relay-phone/config.json
+```
+
+For the first pairing, either open one SSH tunnel and click the console (the QR code lives there),
+or build `https://<relay>/c/<id>/?g=<gate>` from the `id` and `gate` in the plugin's
+`identity.json` and send it to the phone.
+
+Just want the machine to work, no UI at all: `dsh headless "run the tests"` answers one task and
+prints the result — fine for cron. Note that `dsh plugin` shells out to **pnpm**, so install it on
+the server first (`npm i -g pnpm`).
+
 | Package | Runs on | Install | Upgrade |
 |---|---|---|---|
 | [`dsh-relay-server`](https://www.npmjs.com/package/dsh-relay-server) | your VPS | `npm install -g dsh-relay-server`, or just `npx dsh-relay-server` | `npm install -g dsh-relay-server@latest` |
 | [`dsh-relay-phone`](https://www.npmjs.com/package/dsh-relay-phone) | the DSH machine | Plugins page → Add plugin → `dsh-relay-phone`; from a terminal, `dsh plugin --profile web add dsh-relay-phone` | uninstall and reinstall (or rerun the command), then restart DSH |
 
-Requirements: Node ≥ 22 on the DSH machine (DSH ships one) and Node ≥ 18 for the relay; the relay
-needs a public IP and `openssl` (it generates the agents' self-signed certificate).
+Requirements: the desktop app ships its own Node; installing DSH from npm needs **Node ≥ 24.9** (the
+engine its package declares). Node ≥ 18 for the relay, which also needs a public IP and `openssl`
+(it generates the agents' self-signed certificate).
 `dsh-relay-server --version` prints the relay version; the console footer shows the plugin's.
 
 ## Relay details (run your own)

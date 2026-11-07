@@ -79,13 +79,45 @@ dsh plugin --profile web add link:./packages/plugin
 里点那个按钮是同源跳转，**不需要知道端口**；命令行启动的 `dsh web` 用它打印的地址加
 `/relay-bridge/panel`。
 
+### 无头服务器（没有桌面、没有浏览器）
+
+DSH 本体就是 Node 服务，`dsh web` 只绑定 loopback，不碰显示器——所以远程机器、容器、NAS 上都能跑：
+
+```sh
+npm install -g @deepseek-ai/dsh           # 需要 Node ≥ 24.9
+dsh web --host 127.0.0.1 --port 3080 --no-open
+```
+
+`--host` 不接受通配地址，这是有意的：想从外面访问，要么走中继（下面这条），要么
+`ssh -L 3080:127.0.0.1:3080 服务器` 把端口拉到本地浏览器。
+
+无头机上没法点面板，所以配置直接写文件（二选一，都不需要浏览器）：
+
+```sh
+# A. profile 配置层——启动时由插件读进配置
+~/.dsh/profiles/web/cordis.patch.yml
+- id: relay-bridge
+  config: { relayScheme: https, relayHost: example.com, relayPort: 8443,
+            agentPort: 9443, relayKey: "<key>", autoStart: true }
+
+# B. 插件自己的配置——面板写入的同一个文件
+~/.dsh/plugin-data/dsh-relay-phone/config.json
+```
+
+第一次配对要么开一次 SSH 隧道点一下面板（二维码就在那儿），要么把 identity 里的
+`id` / `gate` 拼成 `https://<relay>/c/<id>/?g=<gate>` 发给手机。
+
+只想让机器干活、不要界面：`dsh headless "跑一遍测试"` 一次性执行并打印结果，适合 cron。
+另外，`dsh plugin` 背后调用 **pnpm**，无头机记得先 `npm i -g pnpm`。
+
 | 包 | 跑在哪 | 安装 | 升级 |
 |---|---|---|---|
 | [`dsh-relay-server`](https://www.npmjs.com/package/dsh-relay-server) | 你的 VPS | `npm install -g dsh-relay-server`，或直接用 `npx dsh-relay-server` | `npm install -g dsh-relay-server@latest` |
 | [`dsh-relay-phone`](https://www.npmjs.com/package/dsh-relay-phone) | 跑 DSH 的机器 | 插件页「添加插件」填 `dsh-relay-phone`；命令行是 `dsh plugin --profile web add dsh-relay-phone` | 卸载再装（或重复同一命令），然后重启 DSH |
 
-环境要求：跑 DSH 的机器 Node ≥ 22（DSH 自带），中继 Node ≥ 18；中继要有公网 IP，并且有 `openssl`
-（生成 agent 自签证书）。`dsh-relay-server --version` 打印中继版本，插件版本看面板页脚。
+环境要求：桌面 App 自带 Node；从 npm 装 DSH 需要 **Node ≥ 24.9**（包里声明的引擎）。中继 Node ≥ 18，
+要有公网 IP，并且有 `openssl`（生成 agent 自签证书）。`dsh-relay-server --version` 打印中继版本，
+插件版本看面板页脚。
 
 ## 中继细节（自建才需要）
 
