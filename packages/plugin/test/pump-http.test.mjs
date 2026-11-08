@@ -233,5 +233,60 @@ await scenario('the boot script is only injected into html', async () => {
   }
 })
 
+// The audit's third finding: the ciphertext did not name the request it belonged
+// to, so a captured envelope could be re-submitted to another endpoint.
+await scenario('a sealed request is bound to its method and path', async () => {
+  const h = await harness((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json', 'content-length': '2' })
+    res.end('{}')
+  })
+
+  // Same framing the boot patch produces: 0x02 | u32 len | {m,t,c} | body.
+  const sealBound = (method, target, contentType, bytes) => {
+    const header = Buffer.from(JSON.stringify({ m: method, t: target, c: contentType }), 'utf8')
+    const prefix = Buffer.alloc(5)
+    prefix[0] = 0x02
+    prefix.writeUInt32BE(header.length, 1)
+    return h.box.seal(h.box.envelopeKey, Buffer.concat([prefix, header, bytes]))
+  }
+
+  const send = (sid, method, path, body) => {
+    h.pump.handleStreamData(sid, Buffer.concat([
+      Buffer.from(`${method} ${h.url(path)} HTTP/1.1\r\nHost: relay.example\r\n`
+        + `x-relay-enc: 1\r\nx-relay-ct: application/json\r\ncontent-length: ${body.length}\r\n`
+        + 'Connection: close\r\n\r\n', 'latin1'),
+      body,
+    ]))
+  }
+
+  try {
+    // 1. the envelope names a different path than the request it arrived on
+    send(13, 'POST', '/api/approve', sealBound('POST', '/api/read-only', 'application/json', Buffer.from('{}')))
+    await waitFor(() => h.closed.includes(13), 're-routed envelope refused')
+    assert.equal(h.hits.length, 0, 'the host never saw the re-routed request')
+
+    // 2. same path, different method
+    send(14, 'DELETE', '/api/state', sealBound('POST', '/api/state', 'application/json', Buffer.from('{}')))
+    await waitFor(() => h.closed.includes(14), 'method swap refused')
+    assert.equal(h.hits.length, 0, 'the host never saw the method swap')
+
+    // 3. a correct binding is unwrapped: the prefix never reaches the host
+    send(15, 'POST', '/api/state', sealBound('POST', '/api/state', 'application/json', Buffer.from('{"v":1}')))
+    await waitFor(() => h.hits.length === 1)
+    assert.equal(h.hits[0].url, '/api/state', 'the sealed target was honoured')
+    assert.equal(h.hits[0].method, 'POST', 'the sealed method was honoured')
+    assert.deepEqual(h.hits[0].body, Buffer.from('{"v":1}'), 'the prefix is stripped before forwarding')
+
+    // 4. a bare body that merely starts with 0x02 is not mistaken for a binding
+    h.reset()
+    const binary = Buffer.from([0x02, 0xff, 0xff, 0xff, 0xff, 0x00, 0x01, 0x02])
+    send(16, 'POST', '/api/upload', h.box.seal(h.box.envelopeKey, binary))
+    await waitFor(() => h.hits.length === 2)
+    assert.deepEqual(h.hits[1].body, binary, 'an unbound binary body is forwarded intact')
+  } finally {
+    h.stop()
+  }
+})
+
 console.log(failures === 0 ? 'all pump http checks passed' : `${failures} pump http check(s) failed`)
 process.exit(failures === 0 ? 0 : 1)

@@ -232,6 +232,26 @@ export function buildBootSource(id, gate) {
     return out
   }
 
+  // Seal a body together with the request it belongs to.
+  //
+  // Without this, the relay could take a valid envelope and submit it to a
+  // different endpoint or with a different method: the ciphertext stays valid
+  // because it never named where it was going. The plaintext is now
+  //   0x02 | u32 headerLen | JSON {m,t,c} | body
+  // and the host refuses a request whose outer method/target disagree.
+  var BOUND = 0x02
+  function sealBound(method, target, contentType, bytes) {
+    var enc = new TextEncoder()
+    var header = enc.encode(JSON.stringify({ m: method, t: target, c: contentType || '' }))
+    var payload = new Uint8Array(1 + 4 + header.length + bytes.length)
+    payload[0] = BOUND
+    var view = new DataView(payload.buffer)
+    view.setUint32(1, header.length)
+    payload.set(header, 5)
+    payload.set(bytes, 5 + header.length)
+    return sealEnvelope(payload)
+  }
+
   // -- fetch patch ------------------------------------------------------------
   var origFetch = window.fetch
   try {
@@ -361,11 +381,15 @@ export function buildBootSource(id, gate) {
         // The host refuses a non-GET/HEAD request without one, because an empty
         // body was exactly how a ticket alone could act as the user.
         var bytes = body ? body.bytes : new Uint8Array(0)
+        var contentType = originalType || (body && body.type) || 'text/plain;charset=UTF-8'
         headers.set('content-type', 'application/octet-stream')
-        headers.set('x-relay-ct', originalType || (body && body.type) || 'text/plain;charset=UTF-8')
+        headers.set('x-relay-ct', contentType)
         return origFetch(finalUrl, Object.assign({}, options, {
           headers: headers,
-          body: sealEnvelope(bytes),
+          // Bind the body to the request it was made for: method, path+query and
+          // content-type travel inside the envelope, so the relay cannot re-route
+          // a captured request to another endpoint.
+          body: sealBound(options.method || 'GET', absolute.pathname + absolute.search, contentType, bytes),
         })).then(maybeUnwrap)
       }).catch(function (error) {
         // A body-serialization failure must not silently downgrade to plaintext.

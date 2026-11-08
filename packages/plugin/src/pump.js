@@ -654,6 +654,59 @@ export class PumpManager {
     this.maybeFinishSealedRequest(sid, stream)
   }
 
+  /**
+   * Unwrap the sealed request binding, if present.
+   *
+   * The plaintext is `0x02 | u32 headerLen | {"m","t","c"} | body`. Older clients
+   * (the phone page's own RPC) send the bare body, which stays supported: their
+   * outer path is fixed, so there is nothing to re-route.
+   */
+  unwrapBound(plain) {
+    // A leading 0x02 could also be ordinary binary data (an upload that happens to
+    // start there), so anything that is not a well-formed binding is treated as a
+    // bare body: that is the older format, and the phone page still uses it.
+    if (plain.length < 6 || plain[0] !== 0x02) return { body: plain, bound: null }
+    const headerLength = plain.readUInt32BE(1)
+    if (headerLength === 0 || 5 + headerLength > plain.length) return { body: plain, bound: null }
+    try {
+      const parsed = JSON.parse(plain.subarray(5, 5 + headerLength).toString('utf8'))
+      if (!parsed || typeof parsed.m !== 'string' || typeof parsed.t !== 'string') {
+        return { body: plain, bound: null }
+      }
+      return { body: plain.subarray(5 + headerLength), bound: parsed }
+    } catch {
+      return { body: plain, bound: null }
+    }
+  }
+
+  /**
+   * A bound request must arrive on the method and path it was sealed for.
+   * A mismatch means the ciphertext was recorded and re-submitted elsewhere,
+   * which only the relay can do - so it fails closed and is logged.
+   */
+  boundMismatch(bound, info) {
+    const method = String(bound.m).toUpperCase()
+    if (method !== info.method.toUpperCase()) return `method ${info.method} != sealed ${method}`
+    const splitTarget = (value) => {
+      const index = value.indexOf('?')
+      return index === -1 ? [value, ''] : [value.slice(0, index), value.slice(index + 1)]
+    }
+    const [outerPath, outerQuery] = splitTarget(info.target ?? info.path)
+    const [innerPath, innerQuery] = splitTarget(String(bound.t))
+    if (outerPath !== innerPath) {
+      return `path ${outerPath.slice(0, 60)} != sealed ${innerPath.slice(0, 60)}`
+    }
+    if (outerQuery !== innerQuery) {
+      // Same parameters in a different order is still the same request; a
+      // different set is not.
+      const key = (query) => query.split('&').filter(Boolean).sort().join('&')
+      if (key(outerQuery) !== key(innerQuery)) {
+        return `query ${outerQuery.slice(0, 40)} != sealed ${innerQuery.slice(0, 40)}`
+      }
+    }
+    return null
+  }
+
   maybeFinishSealedRequest(sid, stream) {
     if (stream.buffer.length < stream.reqLength) return
     const sealedBody = stream.buffer.subarray(0, stream.reqLength)
@@ -674,6 +727,17 @@ export class PumpManager {
   /** Send an opened (or bodyless) sealed request upstream and seal the response. */
   forwardSealed(sid, stream, plain) {
     const info = stream.info
+    const { body, bound } = this.unwrapBound(plain)
+    if (bound) {
+      const mismatch = this.boundMismatch(bound, info)
+      if (mismatch) {
+        auditLog(`sealed request binding mismatch: ${mismatch}`)
+        this.respondInline(sid, 400, 'Bad Request', 'dsh-relay-phone: sealed request was re-routed\n')
+        this.closeStream(sid)
+        return
+      }
+    }
+    plain = body
     // A sealed call to the mobile app's own API is answered here, not proxied
     // to DSH: the mobile bridge talks to host services directly.
     if (this.mobile && info.path === MOBILE_RPC_PATH) {
