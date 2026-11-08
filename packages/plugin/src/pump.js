@@ -451,10 +451,17 @@ export class PumpManager {
 
   /**
    * True for the GET/HEAD document + asset traffic a phone browser issues by
-   * itself. Explicitly excludes `/api/`, the mobile RPC path and upgrades.
+   * itself, and for WebSocket handshakes.
+   *
+   * A WebSocket handshake is an HTTP GET with an Upgrade header: there is no
+   * body, so an envelope cannot ride along. Sealing happens per frame instead,
+   * and `pumpPhoneWs` refuses any data frame that does not open — which is why
+   * the handshake may pass while the payload stays mandatory-sealed. (DSH's own
+   * event mux, `/api/remote.mux`, is such a WebSocket; blocking the handshake
+   * broke the desktop UI with "Reconnecting".)
    */
   isPlaintextDocument(info, isUpgrade) {
-    if (isUpgrade) return false
+    if (isUpgrade) return info.method === 'GET'
     if (info.method !== 'GET' && info.method !== 'HEAD') return false
     if (info.path.startsWith('/api/')) return false
     return PLAINTEXT_DOCUMENT.test(info.path)

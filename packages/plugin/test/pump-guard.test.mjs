@@ -106,7 +106,7 @@ const request = (path, extra = '') => Buffer.from(
   console.log('ok 2: a client-supplied x-dsh-relay header is replaced')
 }
 
-// ── 3. plaintext writes and upgrades are refused ────────────────────────
+// ── 3. plaintext writes are refused; a websocket handshake passes ────────
 {
   const hits = []
   const server = await listen((req, res) => {
@@ -127,19 +127,21 @@ const request = (path, extra = '') => Buffer.from(
   assert.match(h.text(), /403 Forbidden/, 'plaintext API writes are refused')
   assert.deepEqual(hits, [], 'the host never sees them')
 
-  // Same for a websocket upgrade: the deskop UI socket is not reachable either.
+  // A websocket handshake *is* allowed: it is a GET with no body, so an envelope
+  // has nowhere to ride. What must not pass is an unsealed data frame, and the
+  // codec closes the stream when one does not open.
   h.reset()
   h.pump.handleStreamData(42, Buffer.from(
-    `GET /c/${ID}/api/ws?g=${GATE} HTTP/1.1\r\nHost: relay.example\r\n`
+    `GET /c/${ID}/api/remote.mux?g=${GATE} HTTP/1.1\r\nHost: relay.example\r\n`
     + 'Upgrade: websocket\r\nConnection: Upgrade\r\n'
     + 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n',
   ))
-  await waitFor(() => h.closed.includes(42))
-  assert.match(h.text(), /403 Forbidden/, 'plaintext upgrades are refused')
-  assert.deepEqual(hits, [], 'still nothing reaches the host')
+  await waitFor(() => /101 Switching Protocols/.test(h.text()) || h.closed.includes(42), 'the handshake is forwarded')
+  assert.deepEqual(hits, ['/api/remote.mux'], 'the upgrade reaches the host')
+  assert.ok(!/403 Forbidden/.test(h.text()), 'upgrades are no longer refused')
 
   server.close()
-  console.log('ok 3: plaintext writes and upgrades are refused over the relay')
+  console.log('ok 3: plaintext writes refused; the mux handshake is forwarded')
 }
 
 // ── 4. the opt-in that restores the old desktop replay ──────────────────
