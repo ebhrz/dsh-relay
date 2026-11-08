@@ -770,10 +770,17 @@ export class PumpManager {
     headers.unshift(`Origin: ${target.origin}`)
     headers.push('x-dsh-relay: 1')
     if (authCookie) headers.push(`Cookie: ${authCookie}`)
-    headers.push(`Content-Type: ${info.headers.get('x-relay-ct') ?? 'text/plain;charset=UTF-8'}`)
+    // A bound request carries its content-type inside the envelope: rewriting the
+    // x-relay-ct header needs no key, so the sealed value wins when there is one.
+    const contentType = (bound && typeof bound.c === 'string' && bound.c)
+      ? bound.c
+      : (info.headers.get('x-relay-ct') ?? 'text/plain;charset=UTF-8')
+    headers.push(`Content-Type: ${contentType}`)
     headers.push(`Content-Length: ${plain.length}`)
     headers.push('Connection: close')
-    const head = `${info.requestLine}\r\n${headers.join('\r\n')}\r\n\r\n`
+    // Use the sealed request line: the outer one is what the relay chose.
+    const requestLine = bound ? `${String(bound.m).toUpperCase()} ${bound.t} HTTP/1.1` : info.requestLine
+    const head = `${requestLine}\r\n${headers.join('\r\n')}\r\n\r\n`
     this.bufferedForward(sid, stream, Buffer.from(head, 'latin1'), plain, { sealResponse: true, target })
   }
 

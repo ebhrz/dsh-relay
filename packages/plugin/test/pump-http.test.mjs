@@ -272,17 +272,32 @@ await scenario('a sealed request is bound to its method and path', async () => {
 
     // 3. a correct binding is unwrapped: the prefix never reaches the host
     send(15, 'POST', '/api/state', sealBound('POST', '/api/state', 'application/json', Buffer.from('{"v":1}')))
-    await waitFor(() => h.hits.length === 1)
+    await waitFor(() => h.hits.length === 1, 'bound POST forwarded')
     assert.equal(h.hits[0].url, '/api/state', 'the sealed target was honoured')
     assert.equal(h.hits[0].method, 'POST', 'the sealed method was honoured')
     assert.deepEqual(h.hits[0].body, Buffer.from('{"v":1}'), 'the prefix is stripped before forwarding')
 
+    // The header is client-supplied and the relay can rewrite it, so the sealed
+    // content-type must win.
+    h.reset()
+    send(17, 'POST', '/api/state', sealBound('POST', '/api/state', 'application/json', Buffer.from('{}')))
+    // Rewrite the outer header to something else, as a hostile relay would.
+    h.pump.handleStreamData(18, Buffer.concat([
+      Buffer.from(`POST ${h.url('/api/state')} HTTP/1.1\r\nHost: relay.example\r\n`
+        + `x-relay-enc: 1\r\nx-relay-ct: text/plain\r\ncontent-length: ${sealBound('POST', '/api/state', 'application/json', Buffer.from('{}')).length}\r\n`
+        + 'Connection: close\r\n\r\n', 'latin1'),
+      sealBound('POST', '/api/state', 'application/json', Buffer.from('{}')),
+    ]))
+    await waitFor(() => h.hits.length === 3, 'both bound posts arrive')
+    assert.equal(h.hits[2].headers['content-type'], 'application/json', 'the sealed content-type wins')
+
     // 4. a bare body that merely starts with 0x02 is not mistaken for a binding
     h.reset()
+    const seen = h.hits.length
     const binary = Buffer.from([0x02, 0xff, 0xff, 0xff, 0xff, 0x00, 0x01, 0x02])
     send(16, 'POST', '/api/upload', h.box.seal(h.box.envelopeKey, binary))
-    await waitFor(() => h.hits.length === 2)
-    assert.deepEqual(h.hits[1].body, binary, 'an unbound binary body is forwarded intact')
+    await waitFor(() => h.hits.length === seen + 1, 'unbound binary forwarded')
+    assert.deepEqual(h.hits[seen].body, binary, 'an unbound binary body is forwarded intact')
   } finally {
     h.stop()
   }
