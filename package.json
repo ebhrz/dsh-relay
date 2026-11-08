@@ -1,6 +1,6 @@
 {
   "name": "dsh-relay",
-  "version": "0.13.1",
+  "version": "0.14.0",
   "private": true,
   "description": "Phone-first remote control for a local DeepSeek Harness, routed through your own zero-knowledge relay.",
   "license": "Apache-2.0",

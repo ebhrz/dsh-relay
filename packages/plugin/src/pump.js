@@ -40,6 +40,9 @@ const PENDING_LIMIT = 1024 * 1024
 const SEALED_BODY_LIMIT = 32 * 1024 * 1024
 // 24-byte nonce + 16-byte secretbox overhead: nothing smaller can be an envelope.
 const SEALED_BODY_MIN = 40
+// The only websocket endpoints DSH's UI opens. A forged Upgrade elsewhere is not
+// a handshake, it is a plaintext GET with a lie in the headers.
+const SOCKET_ENDPOINTS = new Set(['/api/remote.mux'])
 const RPC_LIMIT = 32 * 1024 * 1024
 const EMPTY = Buffer.alloc(0)
 // Per-request tracing stays off unless explicitly requested: the pump sees
@@ -234,6 +237,8 @@ export class PumpManager {
       }
       case 'req-body': {
         stream.buffer = Buffer.concat([stream.buffer, this.capChunk(stream, chunk)])
+        // Progress resets the deadline; a stalled sender does not.
+        this.armIdle(sid, stream)
         this.maybeFinishSealedRequest(sid, stream)
         return
       }
@@ -435,11 +440,28 @@ export class PumpManager {
       return
     }
 
+    // `Upgrade: websocket` is declared by the client, so it proves nothing on its
+    // own: a forged header on `/api/private` used to hand the host's cookie to a
+    // plaintext GET. Only a complete handshake on a known socket endpoint counts.
+    if (sealed && isUpgrade) {
+      auditLog(`relayed request claimed both sealed and upgrade (${info.path})`)
+      this.respondInline(sid, 400, 'Bad Request')
+      this.closeStream(sid)
+      return
+    }
+    if (isUpgrade && !this.isSocketEndpoint(info)) {
+      auditLog(`relayed upgrade on a non-socket path refused (${info.method} ${info.path})`)
+      this.respondInline(sid, 403, 'Forbidden', 'dsh-relay-phone: not a websocket endpoint\n')
+      this.closeStream(sid)
+      return
+    }
+
     // Anything unsealed past this point would be forwarded to the local DSH with
     // the host's own browser cookie attached. The relay sees the ticket and the
     // gate, so it could mint the same request itself: plaintext is limited to
     // the documents and assets a browser fetches on its own.
-    if (!this.allowDesktopPlaintext && !this.isPlaintextDocument(info, isUpgrade)) {
+    const plaintextOk = isUpgrade || this.isPlaintextDocument(info)
+    if (!this.allowDesktopPlaintext && !plaintextOk) {
       auditLog(`relayed plaintext ${info.method} ${info.path} refused (sealed only)`)
       this.respondInline(
         sid, 403, 'Forbidden',
@@ -453,19 +475,44 @@ export class PumpManager {
     this.plainForward(sid, stream, info, headText, rest, { isUpgrade, isDocument, relay: stream.relay })
   }
 
+  /** Every raw value for a header name, in wire order (the Map keeps only the last). */
+  headerValues(info, name) {
+    const wanted = name.toLowerCase()
+    const values = []
+    for (const line of info.rawHeaders) {
+      const colon = line.indexOf(':')
+      if (colon <= 0) continue
+      if (line.slice(0, colon).trim().toLowerCase() !== wanted) continue
+      values.push(line.slice(colon + 1).trim())
+    }
+    return values
+  }
+
+  /**
+   * True for a *complete* WebSocket handshake on a path that really is a socket.
+   *
+   * `Upgrade: websocket` is client-declared, so a forged one on `/api/private`
+   * used to hand the host's cookie to a plaintext GET. The path allowlist plus
+   * the mandatory handshake fields are what make the header trustworthy.
+   */
+  isSocketEndpoint(info) {
+    if (info.method !== 'GET') return false
+    if (!SOCKET_ENDPOINTS.has(info.path)) return false
+    const connection = this.headerValues(info, 'connection').join(',').toLowerCase()
+    if (!connection.split(',').some((token) => token.trim() === 'upgrade')) return false
+    if ((info.headers.get('sec-websocket-version') ?? '').trim() !== '13') return false
+    // Sec-WebSocket-Key: base64 of 16 random bytes (24 chars with padding).
+    const key = (info.headers.get('sec-websocket-key') ?? '').trim()
+    if (!/^[A-Za-z0-9+/]{22}==$/.test(key)) return false
+    return true
+  }
+
   /**
    * True for the GET/HEAD document + asset traffic a phone browser issues by
-   * itself, and for WebSocket handshakes.
-   *
-   * A WebSocket handshake is an HTTP GET with an Upgrade header: there is no
-   * body, so an envelope cannot ride along. Sealing happens per frame instead,
-   * and `pumpPhoneWs` refuses any data frame that does not open — which is why
-   * the handshake may pass while the payload stays mandatory-sealed. (DSH's own
-   * event mux, `/api/remote.mux`, is such a WebSocket; blocking the handshake
-   * broke the desktop UI with "Reconnecting".)
+   * itself. Socket handshakes are decided separately by `isSocketEndpoint`; a
+   * sealed request is never a document.
    */
-  isPlaintextDocument(info, isUpgrade) {
-    if (isUpgrade) return info.method === 'GET'
+  isPlaintextDocument(info) {
     if (info.method !== 'GET' && info.method !== 'HEAD') return false
     if (info.path.startsWith('/api/')) return false
     return PLAINTEXT_DOCUMENT.test(info.path)
@@ -517,6 +564,9 @@ export class PumpManager {
     stream.phase = 'req-body'
     stream.reqLength = length
     stream.buffer = this.splitBody(stream, rest, length)
+    // Waiting for the rest of an envelope is a bounded wait: a client that sends
+    // half a body and stops must not hold the stream (and its slot) forever.
+    this.armIdle(sid, stream)
     this.maybeFinishSealedRequest(sid, stream)
   }
 
@@ -547,16 +597,55 @@ export class PumpManager {
 
   // -- sealed round trips ----------------------------------------------------------
   prepareSealedForward(sid, stream, info, headText, rest) {
-    // An envelope is never empty: 24 nonce bytes + 16 box overhead, so 40 is the
-    // smallest possible sealed body. A shorter one (in particular `0`) is a
-    // caller that skipped the envelope entirely — the hole that let a ticket-only
-    // empty POST reach the host with its cookie attached.
-    const length = Number(info.headers.get('content-length') ?? '0')
-    if (!Number.isFinite(length) || length < SEALED_BODY_MIN || length > SEALED_BODY_LIMIT) {
+    // Two legitimate shapes:
+    //   * a body-carrying call: the envelope is at least 24+16 bytes and its
+    //     plaintext is the request body (POST/PUT/PATCH/DELETE, or an RPC);
+    //   * a GET/HEAD read: no body, so only the *response* is sealed. The boot
+    //     patch sets x-relay-enc for those too, and refusing them broke every
+    //     desktop read, so the empty body is allowed there — and only there.
+    const method = info.method.toUpperCase()
+    // `info.headers` is a Map that keeps only the last value, so a repeated
+    // content-length would silently win. Ask the wire instead.
+    const lengths = this.headerValues(info, 'content-length')
+    if (lengths.length > 1) {
+      auditLog(`sealed request with ${lengths.length} content-length headers (${info.path})`)
+      this.respondInline(sid, 400, 'Bad Request')
+      this.closeStream(sid)
+      return
+    }
+    const rawLength = lengths[0] ?? null
+    // Decimal digits only: `0x28` is 40 to Number(), which is not a length we agreed to.
+    if (rawLength !== null && !/^\d{1,10}$/.test(rawLength)) {
+      auditLog(`sealed request with a malformed content-length (${info.path}, ${JSON.stringify(rawLength).slice(0, 40)})`)
+      this.respondInline(sid, 400, 'Bad Request')
+      this.closeStream(sid)
+      return
+    }
+    const length = rawLength === null ? 0 : Number(rawLength)
+    const responseOnly = (method === 'GET' || method === 'HEAD') && length === 0
+    if (!Number.isSafeInteger(length) || length < 0 || length > SEALED_BODY_LIMIT) {
       if (DEBUG) console.log('[relay-dbg] 400@prepare sid=%s len=%s ct=%s', sid, length, info.headers.get('content-type'))
-      auditLog(`sealed request without a usable envelope (${info.path}, content-length=${length})`)
+      auditLog(`sealed request with a bad content-length (${info.path}, ${rawLength})`)
+      this.respondInline(sid, 400, 'Bad Request')
+      this.closeStream(sid)
+      return
+    }
+    if (!responseOnly && length < SEALED_BODY_MIN) {
+      // A zero/short body on anything that can change state is not an envelope.
+      auditLog(`sealed request without an envelope (${info.path}, content-length=${length})`)
       this.respondInline(sid, 400, 'Bad Request', 'dsh-relay-phone: sealed requests need an envelope\n')
       this.closeStream(sid)
+      return
+    }
+    if (responseOnly) {
+      if (rest.length > 0) {
+        // The client said "no body" and then sent one: refuse rather than guess.
+        auditLog(`sealed GET ${info.path} carried unexpected body bytes`)
+        this.respondInline(sid, 400, 'Bad Request')
+        this.closeStream(sid)
+        return
+      }
+      this.forwardSealed(sid, stream, Buffer.alloc(0))
       return
     }
     stream.phase = 'req-body'
@@ -569,8 +658,8 @@ export class PumpManager {
     if (stream.buffer.length < stream.reqLength) return
     const sealedBody = stream.buffer.subarray(0, stream.reqLength)
     // Always decrypt. An empty *plaintext* is fine — it still arrives as a 40-byte
-    // envelope — but a zero-length body can never be one, so no request reaches
-    // the host without opening an envelope first.
+    // envelope — but a zero-length body can never be one, so no state-changing
+    // request reaches the host without opening an envelope first.
     const plain = this.cryptoBox.open(this.cryptoBox.envelopeKey, sealedBody)
     if (!plain) {
       auditLog(`sealed request body failed to open (${stream.info.path})`)
@@ -579,6 +668,11 @@ export class PumpManager {
       this.closeStream(sid)
       return
     }
+    this.forwardSealed(sid, stream, plain)
+  }
+
+  /** Send an opened (or bodyless) sealed request upstream and seal the response. */
+  forwardSealed(sid, stream, plain) {
     const info = stream.info
     // A sealed call to the mobile app's own API is answered here, not proxied
     // to DSH: the mobile bridge talks to host services directly.
@@ -652,7 +746,10 @@ export class PumpManager {
       if (stream.sealResponse) {
         out = this.cryptoBox.seal(this.cryptoBox.envelopeKey, out)
         this.respond(sid, 200, 'application/octet-stream', out, { 'x-relay-enc': '1' }, { keepAlive: stream.keepAlive })
-      } else if (stream.injectBoot && /^HTTP\/[\d.]+\s+200/.test(out.toString('latin1').slice(0, 32))) {
+      } else if (stream.injectBoot && isHtmlResponse(out)) {
+        // Only real HTML gets the boot script. A request that merely *claimed*
+        // `sec-fetch-dest: document` to reach a JS asset would otherwise have the
+        // script prepended to JavaScript and break the bundle.
         const injected = injectBootScript(out, stream.relay, { keepAlive: stream.keepAlive })
         this.client?.sendStream(sid, injected)
       } else {
@@ -996,6 +1093,14 @@ function normalizeResponse(responseBuffer) {  const split = responseBuffer.index
 // bytes, so the message stays self-delimiting for keep-alive. The mobile
 // enhancement (viewport meta + touch CSS + drawer JS) rides along in the same
 // insertion. Exported for tests.
+/** A 200 whose Content-Type is really html - the only response the boot script fits. */
+function isHtmlResponse(responseBuffer) {
+  const head = responseBuffer.toString('latin1', 0, Math.min(responseBuffer.length, 2048))
+  if (!/^HTTP\/[\d.]+\s+200/.test(head)) return false
+  const match = /\r\ncontent-type:\s*([^\r\n]*)/i.exec(head)
+  return !!match && /\btext\/html\b/i.test(match[1])
+}
+
 export function injectBootScript(responseBuffer, relay, { keepAlive = false } = {}) {
   const boot = relay
     ? `\n<script>${buildBootSource(relay.id, relay.gate)}</script>\n`

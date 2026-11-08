@@ -16,6 +16,7 @@ const SUITE = [
   'keepalive.test.mjs',
   'pump-guard.test.mjs',
   'replay.test.mjs',
+  'pump-http.test.mjs',
   'mobile-patch.test.mjs',
   'mobile-bridge.test.mjs',
   'mobile-transport.test.mjs',

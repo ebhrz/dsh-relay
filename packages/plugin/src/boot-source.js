@@ -351,16 +351,21 @@ export function buildBootSource(id, gate) {
       }
 
       return bodyPromise.then(function (body) {
-        if (body === null) {
-          // GET/HEAD: response only is sealed.
+        var isRead = options.method === 'GET' || options.method === 'HEAD'
+        if (body === null && isRead) {
+          // GET/HEAD: there is no body, so only the response is sealed.
           return origFetch(finalUrl, Object.assign({}, options, { headers: headers }))
             .then(maybeUnwrap)
         }
+        // Everything else always carries an envelope - including a bodyless POST.
+        // The host refuses a non-GET/HEAD request without one, because an empty
+        // body was exactly how a ticket alone could act as the user.
+        var bytes = body ? body.bytes : new Uint8Array(0)
         headers.set('content-type', 'application/octet-stream')
-        headers.set('x-relay-ct', originalType || body.type || 'text/plain;charset=UTF-8')
+        headers.set('x-relay-ct', originalType || (body && body.type) || 'text/plain;charset=UTF-8')
         return origFetch(finalUrl, Object.assign({}, options, {
           headers: headers,
-          body: sealEnvelope(body.bytes),
+          body: sealEnvelope(bytes),
         })).then(maybeUnwrap)
       }).catch(function (error) {
         // A body-serialization failure must not silently downgrade to plaintext.
