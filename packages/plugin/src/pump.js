@@ -555,12 +555,16 @@ export class PumpManager {
 
   /** Collect one sealed mobile RPC body, then hand it to the bridge. */
   prepareMobileRpc(sid, stream, info, rest) {
-    const length = Number(info.headers.get('content-length') ?? '0')
-    if (!Number.isFinite(length) || length < 0 || length > RPC_LIMIT) {
+    // Same parser as the desktop path: a hex or duplicated content-length must be
+    // refused here too, even though this body never reaches DSH.
+    const parsed = this.parseContentLength(info, RPC_LIMIT)
+    if (parsed.error) {
+      auditLog(`mobile rpc with a ${parsed.error}`)
       this.respondInline(sid, 400, 'Bad Request', 'bad rpc body size\n')
       this.closeStream(sid)
       return
     }
+    const length = parsed.length
     stream.phase = 'req-body'
     stream.reqLength = length
     stream.buffer = this.splitBody(stream, rest, length)
@@ -572,12 +576,14 @@ export class PumpManager {
 
   maybeFinishLocal(sid, stream) {
     const info = stream.info
-    const length = Number(info.headers.get('content-length') ?? '0')
-    if (!Number.isFinite(length) || length < 0 || length > BODY_LIMIT) {
+    const parsed = this.parseContentLength(info, BODY_LIMIT)
+    if (parsed.error) {
+      auditLog(`pairing endpoint with a ${parsed.error}`)
       this.respond(sid, 400, 'text/plain; charset=utf-8', 'bad content-length\n')
       this.closeStream(sid)
       return
     }
+    const length = parsed.length
     if (stream.buffer.length < length) return
     const body = stream.buffer.subarray(0, length)
     const result = this.pairing.handle(info.path, info.method, info.headers, body)
@@ -604,32 +610,18 @@ export class PumpManager {
     //     patch sets x-relay-enc for those too, and refusing them broke every
     //     desktop read, so the empty body is allowed there — and only there.
     const method = info.method.toUpperCase()
-    // `info.headers` is a Map that keeps only the last value, so a repeated
-    // content-length would silently win. Ask the wire instead.
-    const lengths = this.headerValues(info, 'content-length')
-    if (lengths.length > 1) {
-      auditLog(`sealed request with ${lengths.length} content-length headers (${info.path})`)
+    // One strict parser for every reader: duplicates and `0x28` used to slip
+    // through here (the Map keeps the last value, Number() accepts hex).
+    const parsed = this.parseContentLength(info, SEALED_BODY_LIMIT)
+    if (parsed.error) {
+      auditLog(`sealed request with a ${parsed.error} (${info.path})`)
+      if (DEBUG) console.log('[relay-dbg] 400@prepare sid=%s why=%s', sid, parsed.error)
       this.respondInline(sid, 400, 'Bad Request')
       this.closeStream(sid)
       return
     }
-    const rawLength = lengths[0] ?? null
-    // Decimal digits only: `0x28` is 40 to Number(), which is not a length we agreed to.
-    if (rawLength !== null && !/^\d{1,10}$/.test(rawLength)) {
-      auditLog(`sealed request with a malformed content-length (${info.path}, ${JSON.stringify(rawLength).slice(0, 40)})`)
-      this.respondInline(sid, 400, 'Bad Request')
-      this.closeStream(sid)
-      return
-    }
-    const length = rawLength === null ? 0 : Number(rawLength)
+    const length = parsed.length
     const responseOnly = (method === 'GET' || method === 'HEAD') && length === 0
-    if (!Number.isSafeInteger(length) || length < 0 || length > SEALED_BODY_LIMIT) {
-      if (DEBUG) console.log('[relay-dbg] 400@prepare sid=%s len=%s ct=%s', sid, length, info.headers.get('content-type'))
-      auditLog(`sealed request with a bad content-length (${info.path}, ${rawLength})`)
-      this.respondInline(sid, 400, 'Bad Request')
-      this.closeStream(sid)
-      return
-    }
     if (!responseOnly && length < SEALED_BODY_MIN) {
       // A zero/short body on anything that can change state is not an envelope.
       auditLog(`sealed request without an envelope (${info.path}, content-length=${length})`)
@@ -645,13 +637,34 @@ export class PumpManager {
         this.closeStream(sid)
         return
       }
-      this.forwardSealed(sid, stream, Buffer.alloc(0))
+      // A read has no body, so there is nothing to bind: the response is sealed
+      // but the relay could still point the same GET elsewhere. That is the one
+      // accepted gap (read-only, cannot change state).
+      this.forwardSealed(sid, stream, Buffer.alloc(0), { responseOnly: true })
       return
     }
     stream.phase = 'req-body'
     stream.reqLength = length
     stream.buffer = this.splitBody(stream, rest, length)
+    // The first chunk may never arrive: without a timer here a declared-but-
+    // truncated body left the stream in req-body with no deadline at all.
+    this.armIdle(sid, stream)
     this.maybeFinishSealedRequest(sid, stream)
+  }
+
+  /** Strict decimal content-length from the raw headers; shared by every reader. */
+  parseContentLength(info, limit) {
+    const lengths = this.headerValues(info, 'content-length')
+    if (lengths.length > 1) return { error: `duplicate content-length (${lengths.length})` }
+    const raw = lengths[0]
+    if (raw === undefined) return { length: 0, raw: null }
+    // Decimal digits only: `0x28` is 40 to Number(), which is not what was sent.
+    if (!/^\d{1,10}$/.test(raw)) return { error: `malformed content-length (${raw.slice(0, 20)})` }
+    const length = Number(raw)
+    if (!Number.isSafeInteger(length) || length > limit) {
+      return { error: `content-length out of range (${length})` }
+    }
+    return { length, raw }
   }
 
   /**
@@ -725,7 +738,7 @@ export class PumpManager {
   }
 
   /** Send an opened (or bodyless) sealed request upstream and seal the response. */
-  forwardSealed(sid, stream, plain) {
+  forwardSealed(sid, stream, plain, { responseOnly = false } = {}) {
     const info = stream.info
     const { body, bound } = this.unwrapBound(plain)
     if (bound) {
@@ -736,11 +749,28 @@ export class PumpManager {
         this.closeStream(sid)
         return
       }
+    } else if (!responseOnly && info.path !== MOBILE_RPC_PATH) {
+      // An unbound envelope does not say where it was going, so submitting it to
+      // another endpoint is free. Only the phone page's own RPC - a single fixed
+      // path, always intercepted below - may still arrive unbound; everything that
+      // can reach DSH must carry the binding.
+      auditLog(`sealed request without a binding refused (${info.method} ${info.path})`)
+      this.respondInline(sid, 400, 'Bad Request', 'dsh-relay-phone: this client must bind sealed requests\n')
+      this.closeStream(sid)
+      return
     }
     plain = body
     // A sealed call to the mobile app's own API is answered here, not proxied
     // to DSH: the mobile bridge talks to host services directly.
-    if (this.mobile && info.path === MOBILE_RPC_PATH) {
+    if (info.path === MOBILE_RPC_PATH) {
+      if (!this.mobile) {
+        // Never fall through to DSH with an RPC body: without the bridge there is
+        // no legitimate consumer, and forwarding would leak the payload.
+        auditLog('mobile rpc received but the mobile surface is not mounted')
+        this.respondInline(sid, 404, 'Not Found')
+        this.closeStream(sid)
+        return
+      }
       stream.phase = 'mobile-rpc-pending'
       Promise.resolve()
         .then(() => this.mobile.rpc(sid, plain, this))

@@ -151,9 +151,16 @@ const responseCount = (text) => (text.match(/HTTP\/1\.1 /g) ?? []).length
   })
   const h = harness(server.address().port, { cryptoBox })
   const sid = 14
-  const sealBody = (text) => cryptoBox.seal(key, Buffer.from(text, 'utf8'))
+  // A sealed body must name its request; this mirrors the boot patch's framing.
+  const sealBody = (text, target) => {
+    const header = Buffer.from(JSON.stringify({ m: 'POST', t: target, c: 'application/json' }), 'utf8')
+    const prefix = Buffer.alloc(5)
+    prefix[0] = 0x02
+    prefix.writeUInt32BE(header.length, 1)
+    return cryptoBox.seal(key, Buffer.concat([prefix, header, Buffer.from(text, 'utf8')]))
+  }
   const sealedReq = (text) => {
-    const body = sealBody(text)
+    const body = sealBody(text, '/api/ping')
     return Buffer.concat([
       Buffer.from(`POST /c/${ID}/api/ping?g=${GATE} HTTP/1.1\r\nHost: relay.example\r\n`
         + 'x-relay-enc: 1\r\nx-relay-ct: application/json\r\n'

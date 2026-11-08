@@ -115,6 +115,20 @@
     return out
   }
 
+  // Seal a body together with the request it belongs to, so a captured envelope
+  // cannot be re-submitted to a different endpoint by the relay.
+  //   0x02 | u32 headerLen | {"m","t","c"} | body
+  function sealBound(method, target, contentType, bytes) {
+    var enc = new TextEncoder()
+    var header = enc.encode(JSON.stringify({ m: method, t: target, c: contentType || '' }))
+    var payload = new Uint8Array(1 + 4 + header.length + bytes.length)
+    payload[0] = 0x02
+    new DataView(payload.buffer).setUint32(1, header.length)
+    payload.set(header, 5)
+    payload.set(bytes, 5 + header.length)
+    return seal(payload)
+  }
+
   // The relay could re-submit an old response (stale approval result, stale
   // session list). Refuse a nonce we have already opened; bounded for a phone.
   var seenNonces = typeof Set === 'function' ? new Set() : null
@@ -150,7 +164,8 @@
     if (!envKey) throw new Error('未配对：缺少密钥')
     var id = ++rpcSeq
     var payload = JSON.stringify({ id: id, method: method, params: params || {} })
-    var body = seal(new TextEncoder().encode(payload))
+    // Bound to the one path this page ever posts to.
+    var body = sealBound('POST', '/__relay/m/rpc', 'application/json', new TextEncoder().encode(payload))
     var res = await fetch(PREFIX + '/__relay/m/rpc?g=' + encodeURIComponent(GATE), {
       method: 'POST',
       credentials: 'include',

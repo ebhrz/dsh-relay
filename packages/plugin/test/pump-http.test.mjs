@@ -10,6 +10,16 @@ import http from 'node:http'
 import { CryptoBox } from '../src/crypto.js'
 import { PumpManager } from '../src/pump.js'
 
+
+// Same framing the boot patch produces: 0x02 | u32 len | {m,t,c} | body.
+const sealBound = (box, method, target, contentType, bytes) => {
+  const header = Buffer.from(JSON.stringify({ m: method, t: target, c: contentType }), 'utf8')
+  const prefix = Buffer.alloc(5)
+  prefix[0] = 0x02
+  prefix.writeUInt32BE(header.length, 1)
+  return box.seal(box.envelopeKey, Buffer.concat([prefix, header, bytes]))
+}
+
 const GATE = 'b'.repeat(64)
 const ID = 'HTTP0001'
 
@@ -175,7 +185,7 @@ await scenario('a state-changing request still needs an envelope', async () => {
 
     // The legitimate shape: a real envelope, even for an empty plaintext.
     h.reset()
-    const envelope = h.box.seal(h.box.envelopeKey, Buffer.alloc(0))
+    const envelope = sealBound(h.box, 'POST', '/api/state-changing', 'application/json', Buffer.alloc(0))
     h.pump.handleStreamData(9, Buffer.concat([
       Buffer.from(`POST ${h.url('/api/state-changing')} HTTP/1.1\r\nHost: relay.example\r\n`
         + `x-relay-enc: 1\r\nx-relay-ct: application/json\r\ncontent-length: ${envelope.length}\r\n`
@@ -241,14 +251,7 @@ await scenario('a sealed request is bound to its method and path', async () => {
     res.end('{}')
   })
 
-  // Same framing the boot patch produces: 0x02 | u32 len | {m,t,c} | body.
-  const sealBound = (method, target, contentType, bytes) => {
-    const header = Buffer.from(JSON.stringify({ m: method, t: target, c: contentType }), 'utf8')
-    const prefix = Buffer.alloc(5)
-    prefix[0] = 0x02
-    prefix.writeUInt32BE(header.length, 1)
-    return h.box.seal(h.box.envelopeKey, Buffer.concat([prefix, header, bytes]))
-  }
+  const bind = (method, target, contentType, bytes) => sealBound(h.box, method, target, contentType, bytes)
 
   const send = (sid, method, path, body) => {
     h.pump.handleStreamData(sid, Buffer.concat([
@@ -261,17 +264,17 @@ await scenario('a sealed request is bound to its method and path', async () => {
 
   try {
     // 1. the envelope names a different path than the request it arrived on
-    send(13, 'POST', '/api/approve', sealBound('POST', '/api/read-only', 'application/json', Buffer.from('{}')))
+    send(13, 'POST', '/api/approve', bind('POST', '/api/read-only', 'application/json', Buffer.from('{}')))
     await waitFor(() => h.closed.includes(13), 're-routed envelope refused')
     assert.equal(h.hits.length, 0, 'the host never saw the re-routed request')
 
     // 2. same path, different method
-    send(14, 'DELETE', '/api/state', sealBound('POST', '/api/state', 'application/json', Buffer.from('{}')))
+    send(14, 'DELETE', '/api/state', bind('POST', '/api/state', 'application/json', Buffer.from('{}')))
     await waitFor(() => h.closed.includes(14), 'method swap refused')
     assert.equal(h.hits.length, 0, 'the host never saw the method swap')
 
     // 3. a correct binding is unwrapped: the prefix never reaches the host
-    send(15, 'POST', '/api/state', sealBound('POST', '/api/state', 'application/json', Buffer.from('{"v":1}')))
+    send(15, 'POST', '/api/state', bind('POST', '/api/state', 'application/json', Buffer.from('{"v":1}')))
     await waitFor(() => h.hits.length === 1, 'bound POST forwarded')
     assert.equal(h.hits[0].url, '/api/state', 'the sealed target was honoured')
     assert.equal(h.hits[0].method, 'POST', 'the sealed method was honoured')
@@ -280,24 +283,29 @@ await scenario('a sealed request is bound to its method and path', async () => {
     // The header is client-supplied and the relay can rewrite it, so the sealed
     // content-type must win.
     h.reset()
-    send(17, 'POST', '/api/state', sealBound('POST', '/api/state', 'application/json', Buffer.from('{}')))
+    send(17, 'POST', '/api/state', bind('POST', '/api/state', 'application/json', Buffer.from('{}')))
     // Rewrite the outer header to something else, as a hostile relay would.
     h.pump.handleStreamData(18, Buffer.concat([
       Buffer.from(`POST ${h.url('/api/state')} HTTP/1.1\r\nHost: relay.example\r\n`
-        + `x-relay-enc: 1\r\nx-relay-ct: text/plain\r\ncontent-length: ${sealBound('POST', '/api/state', 'application/json', Buffer.from('{}')).length}\r\n`
+        + `x-relay-enc: 1\r\nx-relay-ct: text/plain\r\ncontent-length: ${bind('POST', '/api/state', 'application/json', Buffer.from('{}')).length}\r\n`
         + 'Connection: close\r\n\r\n', 'latin1'),
-      sealBound('POST', '/api/state', 'application/json', Buffer.from('{}')),
+      bind('POST', '/api/state', 'application/json', Buffer.from('{}')),
     ]))
     await waitFor(() => h.hits.length === 3, 'both bound posts arrive')
     assert.equal(h.hits[2].headers['content-type'], 'application/json', 'the sealed content-type wins')
 
-    // 4. a bare body that merely starts with 0x02 is not mistaken for a binding
+    // 4. an unbound envelope cannot reach DSH at all any more
     h.reset()
     const seen = h.hits.length
     const binary = Buffer.from([0x02, 0xff, 0xff, 0xff, 0xff, 0x00, 0x01, 0x02])
     send(16, 'POST', '/api/upload', h.box.seal(h.box.envelopeKey, binary))
-    await waitFor(() => h.hits.length === seen + 1, 'unbound binary forwarded')
-    assert.deepEqual(h.hits[seen].body, binary, 'an unbound binary body is forwarded intact')
+    await waitFor(() => h.closed.includes(16), 'unbound envelope refused')
+    assert.equal(h.hits.length, seen, 'nothing reached the host')
+
+    // 5. a body that merely starts with 0x02 but IS bound still forwards intact
+    send(19, 'POST', '/api/upload', sealBound(h.box, 'POST', '/api/upload', 'application/octet-stream', binary))
+    await waitFor(() => h.hits.length === seen + 1, 'bound binary forwarded')
+    assert.deepEqual(h.hits[seen].body, binary, 'the bound body is forwarded without its prefix')
   } finally {
     h.stop()
   }

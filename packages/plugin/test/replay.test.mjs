@@ -14,6 +14,16 @@ import path from 'node:path'
 import { CryptoBox } from '../src/crypto.js'
 import { PumpManager } from '../src/pump.js'
 
+
+// Same framing the boot patch produces: 0x02 | u32 len | {m,t,c} | body.
+const sealBound = (box, method, target, contentType, bytes) => {
+  const header = Buffer.from(JSON.stringify({ m: method, t: target, c: contentType }), 'utf8')
+  const prefix = Buffer.alloc(5)
+  prefix[0] = 0x02
+  prefix.writeUInt32BE(header.length, 1)
+  return box.seal(box.envelopeKey, Buffer.concat([prefix, header, bytes]))
+}
+
 const GATE = 'a'.repeat(64)
 const ID = 'REPLAY01'
 
@@ -113,7 +123,7 @@ await scenario('a replayed RPC over the pump reaches the host once', async () =>
   const out = []
   pump.setClient({ sendStream: (_sid, chunk) => out.push(Buffer.from(chunk)), closeStream: () => {} })
 
-  const body = box.seal(box.envelopeKey, Buffer.from(JSON.stringify({ op: 'approve' }), 'utf8'))
+  const body = sealBound(box, 'POST', '/api/ping', 'application/json', Buffer.from(JSON.stringify({ op: 'approve' }), 'utf8'))
   const request = () => Buffer.concat([
     Buffer.from(`POST /c/${ID}/api/ping?g=${GATE} HTTP/1.1\r\nHost: relay.example\r\n`
       + `x-relay-enc: 1\r\nx-relay-ct: application/json\r\ncontent-length: ${body.length}\r\n`
@@ -188,8 +198,8 @@ await scenario('an empty body cannot stand in for an envelope', async () => {
 
     // 3. a legitimate empty *plaintext* still works, because its envelope is 40 bytes
     out.length = 0
-    const emptyEnvelope = box.seal(box.envelopeKey, Buffer.alloc(0))
-    assert.equal(emptyEnvelope.length, 40, 'an empty plaintext seals to 40 bytes')
+    const emptyEnvelope = sealBound(box, 'POST', '/api/shutdown', 'application/json', Buffer.alloc(0))
+    assert.ok(emptyEnvelope.length > 40, 'a bound envelope is the 40-byte box plus its header')
     pump.handleStreamData(73, Buffer.concat([
       head(`content-length: ${emptyEnvelope.length}\r\n`),
       emptyEnvelope,
