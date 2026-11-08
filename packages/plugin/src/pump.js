@@ -38,6 +38,8 @@ const PENDING_LIMIT = 1024 * 1024
 // with a phone screenshot are easily several hundred KB; the old 256KB ceiling
 // rejected them with a bare 400 before they ever reached DSH).
 const SEALED_BODY_LIMIT = 32 * 1024 * 1024
+// 24-byte nonce + 16-byte secretbox overhead: nothing smaller can be an envelope.
+const SEALED_BODY_MIN = 40
 const RPC_LIMIT = 32 * 1024 * 1024
 const EMPTY = Buffer.alloc(0)
 // Per-request tracing stays off unless explicitly requested: the pump sees
@@ -545,10 +547,15 @@ export class PumpManager {
 
   // -- sealed round trips ----------------------------------------------------------
   prepareSealedForward(sid, stream, info, headText, rest) {
+    // An envelope is never empty: 24 nonce bytes + 16 box overhead, so 40 is the
+    // smallest possible sealed body. A shorter one (in particular `0`) is a
+    // caller that skipped the envelope entirely — the hole that let a ticket-only
+    // empty POST reach the host with its cookie attached.
     const length = Number(info.headers.get('content-length') ?? '0')
-    if (!Number.isFinite(length) || length < 0 || length > SEALED_BODY_LIMIT) {
+    if (!Number.isFinite(length) || length < SEALED_BODY_MIN || length > SEALED_BODY_LIMIT) {
       if (DEBUG) console.log('[relay-dbg] 400@prepare sid=%s len=%s ct=%s', sid, length, info.headers.get('content-type'))
-      this.respondInline(sid, 400, 'Bad Request')
+      auditLog(`sealed request without a usable envelope (${info.path}, content-length=${length})`)
+      this.respondInline(sid, 400, 'Bad Request', 'dsh-relay-phone: sealed requests need an envelope\n')
       this.closeStream(sid)
       return
     }
@@ -561,16 +568,16 @@ export class PumpManager {
   maybeFinishSealedRequest(sid, stream) {
     if (stream.buffer.length < stream.reqLength) return
     const sealedBody = stream.buffer.subarray(0, stream.reqLength)
-    let plain = Buffer.alloc(0)
-    if (stream.reqLength > 0) {
-      plain = this.cryptoBox.open(this.cryptoBox.envelopeKey, sealedBody)
-      if (!plain) {
-        auditLog(`sealed request body failed to open (${stream.info.path})`)
-        if (DEBUG) console.log('[relay-dbg] 400@open sid=%s path=%s len=%s bodyHead=%s', sid, stream.info.path, stream.reqLength, sealedBody.subarray(0, 16).toString('hex'))
-        this.respondInline(sid, 400, 'Bad Request')
-        this.closeStream(sid)
-        return
-      }
+    // Always decrypt. An empty *plaintext* is fine — it still arrives as a 40-byte
+    // envelope — but a zero-length body can never be one, so no request reaches
+    // the host without opening an envelope first.
+    const plain = this.cryptoBox.open(this.cryptoBox.envelopeKey, sealedBody)
+    if (!plain) {
+      auditLog(`sealed request body failed to open (${stream.info.path})`)
+      if (DEBUG) console.log('[relay-dbg] 400@open sid=%s path=%s len=%s bodyHead=%s', sid, stream.info.path, stream.reqLength, sealedBody.subarray(0, 16).toString('hex'))
+      this.respondInline(sid, 400, 'Bad Request')
+      this.closeStream(sid)
+      return
     }
     const info = stream.info
     // A sealed call to the mobile app's own API is answered here, not proxied
