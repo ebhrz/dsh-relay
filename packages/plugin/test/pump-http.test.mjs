@@ -311,5 +311,37 @@ await scenario('a sealed request is bound to its method and path', async () => {
   }
 })
 
+
+// The audit's path claim: the allowlist matched raw strings, so an asset path with
+// dot segments could be normalized upstream into a private API.
+await scenario('a traversal path cannot reach an API', async () => {
+  const h = await harness((_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/plain', 'content-length': '8' })
+    res.end('private!')
+  })
+  try {
+    for (const [sid, path] of [
+      [21, '/assets/../api/private'],
+      [22, '/assets/..%2f..%2fapi/private'],
+      [23, '/api/private/../secrets.json'],
+      [24, '//api/private'],
+      [25, '/assets/app.js%00.png'],
+    ]) {
+      h.pump.handleStreamData(sid, request('GET', h.url(path), ['Sec-Fetch-Dest: document']))
+      await waitFor(() => h.closed.includes(sid), `\${path} refused`)
+    }
+    assert.equal(h.hits.length, 0, 'no traversal reached the host')
+    assert.ok(!h.text().includes('private!'), 'no private body came back')
+
+    // A normal asset still passes.
+    h.reset()
+    h.pump.handleStreamData(26, request('GET', h.url('/assets/app.js'), ['Sec-Fetch-Dest: document']))
+    await waitFor(() => h.hits.length === 1, 'a normal asset forwards')
+    assert.equal(h.hits[0].url, '/assets/app.js')
+  } finally {
+    h.stop()
+  }
+})
+
 console.log(failures === 0 ? 'all pump http checks passed' : `${failures} pump http check(s) failed`)
 process.exit(failures === 0 ? 0 : 1)

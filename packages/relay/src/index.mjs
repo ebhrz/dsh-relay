@@ -629,7 +629,15 @@ function handlePhoneSocket(args, socket) {
       const sid = allocSid()
       entry.streams.add(sid)
       const firstBytes = fullHead ?? Buffer.from(`${line}\r\n`, 'latin1')
-      log(`phone-start sid=${sid} firstLine=${JSON.stringify(redactGate(firstBytes.subarray(0, 90).toString('latin1').split('\\r\\n')[0]))}`)
+      // Fixed fields only: the method and the path, never the query string (the
+      // gate rides there, and redaction-by-shape is one regex change away from
+      // leaking it). The path itself is truncated and stripped of non-printables.
+      const firstLine = firstBytes.subarray(0, 90).toString('latin1').split('\r\n')[0]
+      const spaceAt = firstLine.indexOf(' ')
+      const method = spaceAt > 0 ? firstLine.slice(0, spaceAt).replace(/[^\x41-\x5a]/g, '') : ''
+      const requestTarget = spaceAt > 0 ? firstLine.slice(spaceAt + 1) : ''
+      const requestPath = requestTarget.split('?')[0].replace(/[^\x21-\x7e]/g, '?').slice(0, 60)
+      log(`phone-start sid=${sid} method=${method || '?'} path=${requestPath || '?'}`)
       // The request is in and the stream is bridged: the pre-auth deadline is
       // gone, a long-lived streaming response is normal from here on.
       clearPreAuth()
@@ -704,12 +712,31 @@ function startAgentListener(args, tls) {
   // A single agent frame is a phone chunk or a control message; 8 MB is far
   // above both and keeps an unauthenticated peer from making us buffer whatever
   // it likes (ws defaults to 100 MB).
+  // Last-resort net: one malformed frame must not take down the process that
+  // serves every tenant. The specific cases are guarded above; this keeps an
+  // unknown one to a log line instead of an outage. State is per connection, so
+  // continuing is safer here than restarting under everyone.
+  process.on('uncaughtException', (error) => {
+    log('uncaught exception (kept alive):', error?.stack ?? error)
+  })
+  process.on('unhandledRejection', (reason) => {
+    log('unhandled rejection (kept alive):', reason?.stack ?? reason)
+  })
+
   const wss = new WebSocketServer({ noServer: true, maxPayload: 8 * 1024 * 1024 })
 
   server.on('upgrade', (req, socket, head) => {
-    const url = new URL(req.url, 'http://x')
-    if (url.pathname !== '/agent') {
-      socket.write('HTTP/1.1 404 Not Found\r\n\r\n')
+    // `req.url` is attacker-controlled and `new URL()` throws on garbage
+    // (`http://[`, `//`, control bytes). An uncaught throw here kills the process
+    // that serves every tenant, so the parse is guarded.
+    let pathname = null
+    try {
+      pathname = new URL(req.url ?? '/', 'http://x').pathname
+    } catch {
+      pathname = null
+    }
+    if (pathname !== '/agent') {
+      try { socket.write('HTTP/1.1 400 Bad Request\r\n\r\n') } catch {}
       socket.destroy()
       return
     }
@@ -755,6 +782,9 @@ function startAgentListener(args, tls) {
       if (!isBinary) {
         let msg
         try { msg = JSON.parse(data.toString()) } catch { return failConn('bad json') }
+        // `JSON.parse('null')` succeeds, and `msg.t` on null throws inside this
+        // listener - which is an uncaught exception and takes the process down.
+        if (!msg || typeof msg !== 'object' || Array.isArray(msg)) return failConn('bad message')
 
         if (msg.t === 'hello') {
           // A key may have been created a moment ago by the CLI; pick it up now

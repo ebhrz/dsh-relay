@@ -119,7 +119,14 @@ export class PairingService {
 
     if (path === '/__relay/diag' && method === 'POST') {
       const payload = parseJson(bodyBuffer) ?? {}
-      auditLog(`diag ua=${String(payload.ua ?? '').slice(0, 120)} gate=${payload.gate} cookie=${payload.cookie} note=${String(payload.note ?? '').slice(0, 80)}`)
+      // Caller-supplied free text used to be written to the audit log verbatim:
+      // a newline in it forges log lines, and a 120-char UA string is enough to
+      // smuggle anything. Only shapes we expect survive.
+      const printable = (value, max) => String(value ?? '')
+        .replace(/[^\x20-\x7e]/g, '?')
+        .slice(0, max)
+      const note = /^[a-z0-9-]{0,32}$/.test(String(payload.note ?? '')) ? String(payload.note) : 'other'
+      auditLog(`diag ua=${printable(payload.ua, 60)} gate=${payload.gate === true} cookie=${payload.cookie === true} note=${note}`)
       return json({ ok: true })
     }
 

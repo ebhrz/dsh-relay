@@ -342,6 +342,18 @@ export class PumpManager {
       return
     }
     stream.info = info
+    // The path in the request line is raw, and the upstream may normalize it:
+    // `/assets/../api/private` matches the asset allowlist as a string but lands
+    // on a private API once DSH resolves the dots. Refuse anything whose
+    // canonical form differs from what was sent, so the string we allow is the
+    // string DSH routes.
+    const canonical = canonicalPath(info.path)
+    if (canonical === null || canonical !== info.path) {
+      auditLog(`relayed request with a non-canonical path refused (${info.path.slice(0, 120)})`)
+      this.respondInline(sid, 400, 'Bad Request')
+      this.closeStream(sid)
+      return
+    }
     // The phone's own connection can carry further requests after this one:
     // that is what saves a TLS handshake per asset on a mobile link.
     // DSH_RELAY_NO_KEEPALIVE=1 restores the old one-request-per-connection
@@ -391,6 +403,10 @@ export class PumpManager {
       stream.phase = 'local-body'
       stream.reqLength = Number(info.headers.get('content-length') ?? '0')
       stream.buffer = this.splitBody(stream, rest, stream.reqLength)
+      // A gate holder could otherwise open a pairing request, never send the body
+      // and sit on the device's slot forever: this is the same bounded wait the
+      // sealed path uses.
+      this.armIdle(sid, stream)
       this.maybeFinishLocal(sid, stream)
       return
     }
@@ -1279,6 +1295,30 @@ function rewriteAssetUrls(html, relay) {
  * @param query - raw query text, without the leading `?`.
  * @returns the gate value ('' when absent) and the remaining raw query.
  */
+/**
+ * Canonical form of a request path, or null when it cannot be one.
+ *
+ * Dot segments, encoded separators and backslashes are refused outright rather
+ * than resolved: the plugin decides what may pass on this string, and DSH
+ * decides what to route on its own normalization - those two must be the same.
+ */
+export function canonicalPath(rawPath) {
+  if (typeof rawPath !== 'string' || rawPath === '') return null
+  if (!rawPath.startsWith('/')) return null
+  let decoded
+  try { decoded = decodeURIComponent(rawPath) } catch { return null }
+  if (decoded.includes('\\') || decoded.includes('\0')) return null
+  if (decoded.includes('%')) return null // an encoded % is a second round of decoding
+  const trailingSlash = decoded.endsWith('/') && decoded !== '/'
+  const parts = []
+  for (const segment of decoded.split('/')) {
+    if (segment === '' || segment === '.') continue
+    if (segment === '..') return null
+    parts.push(segment)
+  }
+  return `/${parts.join('/')}${trailingSlash ? '/' : ''}`
+}
+
 export function stripGateParam(query) {
   const gate = new URLSearchParams(query).get('g') ?? ''
   const cleanQuery = query

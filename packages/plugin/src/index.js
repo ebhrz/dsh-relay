@@ -56,7 +56,11 @@ export default class RelayBridgeService extends Service {
     this.config = this.mergeConfig(config, stored)
 
     this.identity = loadOrCreateIdentity()
-    this.cryptoBox = new CryptoBox(this.identity, { sessionsPath: path.join(identityDir(), 'sessions.json') })
+    this.cryptoBox = new CryptoBox(this.identity, {
+      sessionsPath: path.join(identityDir(), 'sessions.json'),
+      // Replay memory has to outlive the process, because a ticket does.
+      noncePath: path.join(identityDir(), 'seen-nonces.json'),
+    })
     this.pairing = new PairingService(this.cryptoBox, this.identity)
     this.pump = null
     this.client = null
@@ -193,7 +197,10 @@ export default class RelayBridgeService extends Service {
     this.identity = createIdentity()
     saveIdentity(this.identity)
     auditLog(`identity rotated -> ${this.identity.id} (all paired devices revoked)`)
-    this.cryptoBox = new CryptoBox(this.identity, { sessionsPath: path.join(identityDir(), 'sessions.json') })
+    this.cryptoBox = new CryptoBox(this.identity, {
+      sessionsPath: path.join(identityDir(), 'sessions.json'),
+      noncePath: path.join(identityDir(), 'seen-nonces.json'),
+    })
     this.cryptoBox.resetSessions() // rotation revokes every paired device
     this.pairing = new PairingService(this.cryptoBox, this.identity)
     this.mobile.cryptoBox = this.cryptoBox

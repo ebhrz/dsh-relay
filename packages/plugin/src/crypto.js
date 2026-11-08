@@ -13,6 +13,7 @@
 import nacl from 'tweetnacl'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
+import path from 'node:path'
 
 const sha256 = (...parts) => {
   const hash = crypto.createHash('sha256')
@@ -50,7 +51,43 @@ export class CryptoBox {
     // entry falls out only after REPLAY_MEMORY newer envelopes), which for a
     // personal relay is days of traffic.
     this.openedNonces = new Set()
+    // A ticketed session survives a restart, so the replay memory must too: a
+    // relay that recorded a write before the restart could otherwise replay it
+    // afterwards. Written atomically and only when something new was opened.
+    this.noncePath = options.noncePath ?? null
+    this.nonceDirty = false
+    this.#loadNonces()
+    if (this.noncePath) {
+      this.nonceTimer = setInterval(() => this.flushNonces(), 5000)
+      this.nonceTimer.unref?.()
+    }
     this.#loadSessions()
+  }
+
+  #loadNonces() {
+    if (!this.noncePath) return
+    try {
+      const raw = JSON.parse(fs.readFileSync(this.noncePath, 'utf8'))
+      if (!Array.isArray(raw?.nonces)) return
+      for (const hex of raw.nonces.slice(-REPLAY_MEMORY)) {
+        if (typeof hex === 'string' && /^[0-9a-f]{48}$/.test(hex)) this.openedNonces.add(hex)
+      }
+    } catch {
+      // Missing or corrupt file starts empty: the cost is the pre-restart window.
+    }
+  }
+
+  flushNonces() {
+    if (!this.noncePath || !this.nonceDirty) return
+    this.nonceDirty = false
+    const tmp = `${this.noncePath}.tmp`
+    try {
+      fs.mkdirSync(path.dirname(this.noncePath), { recursive: true, mode: 0o700 })
+      fs.writeFileSync(tmp, JSON.stringify({ nonces: [...this.openedNonces] }), { mode: 0o600 })
+      fs.renameSync(tmp, this.noncePath)
+    } catch {
+      // Losing this write only widens the window by one flush interval.
+    }
   }
 
   /**
@@ -62,6 +99,7 @@ export class CryptoBox {
     const id = nonce.toString('hex')
     if (this.openedNonces.has(id)) return false
     this.openedNonces.add(id)
+    this.nonceDirty = true
     if (this.openedNonces.size > REPLAY_MEMORY) {
       const excess = this.openedNonces.size - REPLAY_MEMORY
       let dropped = 0

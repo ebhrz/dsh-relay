@@ -7,6 +7,7 @@ import crypto from 'node:crypto'
 import QRCode from 'qrcode'
 import { identityDir } from './identity.js'
 import { COOKIE_NAME, TICKET_TTL_SECONDS } from './pairing.js'
+import { isLocalRequest } from './local-request.js'
 import fs from 'node:fs'
 import path from 'node:path'
 
@@ -98,6 +99,11 @@ export async function registerPanel(ctx, service) {
         res.end('dsh-relay: the management panel is desktop-only. Open it on 127.0.0.1.\n')
         return
       }
+      if (!isLocalRequest({ remoteAddress: req.socket?.remoteAddress, host: req.headers.host })) {
+        res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' })
+        res.end('dsh-relay: the management panel answers on localhost only.\n')
+        return
+      }
       // Same ticket policy as /relay-bridge/api: a local page load mints one so
       // its write actions authenticate.
       if (!service.pairing.sessionForHeaders(req.headers)) {
@@ -130,6 +136,11 @@ export async function registerPanel(ctx, service) {
       // from here.
       if (req.headers['x-dsh-relay']) {
         return reply(403, { ok: false, error: 'desktop-only' })
+      }
+      // Loopback peer *and* loopback Host: a proxy that forwards to loopback, or
+      // a rebound domain pointing at 127.0.0.1, must not read the PSK link.
+      if (!isLocalRequest({ remoteAddress: req.socket?.remoteAddress, host: req.headers.host })) {
+        return reply(403, { ok: false, error: 'localhost only' })
       }
 
       // Pairing-ticket gate. Requests arriving through the relay already

@@ -8,6 +8,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { auditLog } from './identity.js'
+import { isLocalRequest } from './local-request.js'
 
 const MIME = {
   '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif',
@@ -23,6 +24,17 @@ export function registerFiles(ctx) {
     kind: 'exact',
     path: '/relay-bridge/files',
     handler: (req, res) => {
+      // This handler will read any absolute path the caller names, so who the
+      // caller is decides everything. Loopback peer plus loopback Host: a proxy
+      // forwarding to 127.0.0.1, or a rebound domain, is refused.
+      if (req.headers['x-dsh-relay'] || !isLocalRequest({
+        remoteAddress: req.socket?.remoteAddress,
+        host: req.headers.host,
+      })) {
+        res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' })
+        res.end('dsh-relay: the file shuttle answers on localhost only.\n')
+        return
+      }
       const url = new URL(req.url ?? '/', 'http://x')
       const raw = url.searchParams.get('p') ?? ''
       if (!raw || raw.includes('\0')) {

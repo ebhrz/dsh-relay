@@ -361,5 +361,45 @@ await scenario('the 404 log line redacts the gate', async () => {
   }
 })
 
+// ── 10. garbage on the agent port does not kill the process ─────────
+await scenario('a malformed upgrade and a null message leave the relay running', async () => {
+  const relay = await startRelay()
+  try {
+    // `new URL()` throws on this; before the guard the throw escaped the 'upgrade'
+    // listener and exited the process that serves every tenant.
+    await new Promise((resolve) => {
+      const socket = net.connect({ host: '127.0.0.1', port: relay.agentPort })
+      relay.sockets.push(socket)
+      socket.on('error', () => resolve())
+      socket.on('close', resolve)
+      socket.on('connect', () => {
+        socket.write('GET http://[ HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n'
+          + 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n')
+      })
+      setTimeout(resolve, 3000)
+    })
+
+    // `JSON.parse('null')` succeeds, and `msg.t` on null throws inside the listener.
+    const ws = new WebSocket(`wss://127.0.0.1:${relay.agentPort}/agent`, { rejectUnauthorized: false })
+    await new Promise((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject) })
+    const closed = new Promise((resolve) => ws.once('close', resolve))
+    ws.send('null')
+    await Promise.race([closed, new Promise((resolve) => setTimeout(resolve, 4000))])
+
+    // The relay must still be serving: a fresh tenant registers and a phone
+    // request still reaches that agent.
+    const created = relay.tenant('alive')
+    const agent = await registerAgent(relay, 'ALIVE001', { key: created.key, gate: GATE_A })
+    assert.ok(agent.registered, 'the agent port still registers after the garbage')
+    const phone = await openPhone(relay, 'ALIVE001', GATE_A)
+    const frame = await firstFrame(agent)
+    assert.ok(frame.length > 4, 'the phone request still reaches the agent')
+    phone.socket.destroy()
+    assert.ok(!/kept alive/.test(relay.log()), 'neither case reached the last-resort handler')
+  } finally {
+    relay.stop()
+  }
+})
+
 console.log(failures === 0 ? 'all relay security checks passed' : `${failures} relay security check(s) failed`)
 process.exit(failures === 0 ? 0 : 1)
