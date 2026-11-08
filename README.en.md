@@ -95,8 +95,7 @@ encryption decorative. "Full desktop UI through the relay" is therefore off by d
 { "allowDesktopPlaintext": true }
 ```
 
-Turning it on means accepting that the relay operator can impersonate you. On a LAN, an SSH tunnel
-or a VPN the desktop UI needs nothing special.
+The desktop UI does **work** under the strict policy: the boot patch seals its `fetch`/XHR/WebSocket traffic, and a WebSocket handshake carries no data (only the frames must open). The switch is for clients that bypass that patch — old builds, hand-written scripts. Turning it on means accepting that the relay operator can impersonate you.
 
 ### Headless server (no desktop, no browser)
 

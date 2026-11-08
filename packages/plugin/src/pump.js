@@ -56,6 +56,8 @@ const PLAINTEXT_DOCUMENT = new RegExp(
   '/favicon\\.ico|' +
   '/assets/[A-Za-z0-9._@/-]+|' + // built UI bundles
   '/plugins/[A-Za-z0-9._@/%-]*|' + // client bundle entry (/plugins/??pkg/file.js)
+  // "open in app" menu icons: plain <img> loads, no extension, no session data
+  '/open-in-app/icon/[A-Za-z0-9._-]+|' +
   '/[^?]*\\.(?:js|mjs|css|map|json|png|jpe?g|gif|svg|webp|avif|ico|woff2?|ttf|otf)' +
   ')$',
 )

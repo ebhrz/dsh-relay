@@ -30,8 +30,7 @@ dsh plugin --profile web add link:./packages/plugin
 Restart `dsh web` afterwards (the plugin is host-side code). Configure it from the sidebar's **Phone Entry** card → **Open console**; in the desktop app that navigates inside the window, so the port does not matter. Through the relay only the phone page and the documents/assets it loads are plaintext; every
 other request must carry a sealed envelope or it is refused with 403. A relay that could forward
 plaintext `/api/*` with the host cookie attached would be able to act as you, which would make the
-end-to-end encryption decorative. Replaying the full desktop UI over the relay is opt-in:
-`{ "allowDesktopPlaintext": true }` in the plugin config.
+end-to-end encryption decorative. The desktop UI works under that policy, because the injected boot patch seals its `fetch`/XHR/WebSocket traffic (a WebSocket handshake carries no data; its frames must open). `{ "allowDesktopPlaintext": true }` remains for clients that bypass the patch.
 
 The panel is deliberately **desktop-only**: it prints the pairing link, which carries the device key, so requests that arrive through the relay are refused.
 

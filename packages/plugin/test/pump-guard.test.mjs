@@ -127,6 +127,12 @@ const request = (path, extra = '') => Buffer.from(
   assert.match(h.text(), /403 Forbidden/, 'plaintext API writes are refused')
   assert.deepEqual(hits, [], 'the host never sees them')
 
+  // Desktop "open in app" menu icons arrive as plain <img> loads.
+  h.reset()
+  h.pump.handleStreamData(25, request('/open-in-app/icon/explorer'))
+  await waitFor(() => /200 OK/.test(h.text()))
+  assert.deepEqual(hits, ['/open-in-app/icon/explorer'], 'icon loads pass as static assets')
+
   // A websocket handshake *is* allowed: it is a GET with no body, so an envelope
   // has nowhere to ride. What must not pass is an unsealed data frame, and the
   // codec closes the stream when one does not open.
@@ -137,7 +143,7 @@ const request = (path, extra = '') => Buffer.from(
     + 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n',
   ))
   await waitFor(() => /101 Switching Protocols/.test(h.text()) || h.closed.includes(42), 'the handshake is forwarded')
-  assert.deepEqual(hits, ['/api/remote.mux'], 'the upgrade reaches the host')
+  assert.equal(hits[hits.length - 1], '/api/remote.mux', 'the upgrade reaches the host')
   assert.ok(!/403 Forbidden/.test(h.text()), 'upgrades are no longer refused')
 
   server.close()

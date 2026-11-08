@@ -89,7 +89,7 @@ dsh plugin --profile web add link:./packages/plugin
 { "allowDesktopPlaintext": true }
 ```
 
-打开就等于接受"中继运营者可以冒充我"。局域网、SSH 隧道或 VPN 里用桌面界面不需要它。
+桌面界面在严格策略下是**可用**的：它的 `fetch`/XHR/WebSocket 都被 boot patch 加了信封，WebSocket 握手本身不带数据所以放行、帧仍然必须解密通过。这个开关只留给绕过了 patch 的客户端（旧客户端、自己写的脚本）。打开就等于接受"中继运营者可以冒充我"。
 
 ### 无头服务器（没有桌面、没有浏览器）
 
