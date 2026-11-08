@@ -248,6 +248,9 @@ The bridge dials **out** to the relay, so your machine needs no public port and 
 | Relay ↔ desktop | Self-signed TLS with certificate pinning on first use (TOFU); if the fingerprint ever changes, the channel halts instead of reconnecting blindly |
 | Revocation | "Regenerate" in the panel rotates the PSK, which invalidates every paired phone at once |
 | Management console | `/relay-bridge/panel` and `/relay-bridge/api` are desktop-only: they print the pairing URL, which carries the PSK. The pump marks relayed requests, so a phone reaching the desktop UI still cannot open the panel |
+| Read proof | A GET/HEAD has no body, so the desktop sends a sealed `{m,t}` proof in `x-relay-bind`; the host checks the method and path, and the proof's nonce joins the replay cache, so the relay can neither mint a read nor replay one |
+| **Page integrity** | ❌ **Not protected.** HTML has to reach the browser in the clear, so whoever serves it can inject script that runs with page authority — end-to-end encryption covers payloads, not page code. Pairing therefore means trusting that party not to modify your page |
+| **Same-origin tenants** | ❌ Not isolated. Tenants differ only by path, so the browser treats them as one origin: another tenant's page can read the PSK in your `localStorage`. Either give each tenant its own subdomain, or only pair on a relay whose operator you trust |
 
 **What the relay can see:** device ids, gates, connection metadata, request sizes and timing, and client IPs. Not your prompts, tool output, or file contents.
 
