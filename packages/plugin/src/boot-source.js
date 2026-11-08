@@ -239,6 +239,12 @@ export function buildBootSource(id, gate) {
   // because it never named where it was going. The plaintext is now
   //   0x02 | u32 headerLen | JSON {m,t,c} | body
   // and the host refuses a request whose outer method/target disagree.
+  function bytesToBase64(bytes) {
+    var text = ''
+    for (var i = 0; i < bytes.length; i++) text += String.fromCharCode(bytes[i])
+    return btoa(text)
+  }
+
   var BOUND = 0x02
   function sealBound(method, target, contentType, bytes) {
     var enc = new TextEncoder()
@@ -373,7 +379,16 @@ export function buildBootSource(id, gate) {
       return bodyPromise.then(function (body) {
         var isRead = options.method === 'GET' || options.method === 'HEAD'
         if (body === null && isRead) {
-          // GET/HEAD: there is no body, so only the response is sealed.
+          // GET/HEAD: there is no body, so only the response is sealed - but the
+          // request still has to prove it came from this page. Without the proof
+          // header the relay could mint a GET of its own and make the host run it
+          // with the host cookie.
+          headers.set('x-relay-bind', bytesToBase64(sealBound(
+            options.method || 'GET',
+            absolute.pathname + absolute.search,
+            '',
+            new Uint8Array(8).fill(0),
+          )))
           return origFetch(finalUrl, Object.assign({}, options, { headers: headers }))
             .then(maybeUnwrap)
         }

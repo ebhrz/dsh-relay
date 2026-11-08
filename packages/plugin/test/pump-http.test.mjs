@@ -152,9 +152,11 @@ await scenario('a sealed GET carries no body and seals its response', async () =
   })
   try {
     // A bare here-doc: no Content-Length, no body.
+    const proof = sealBound(h.box, 'GET', '/api/sessions', '', Buffer.alloc(8))
     h.pump.handleStreamData(4, request('GET', h.url('/api/sessions'), [
       'x-relay-enc: 1',
       'x-relay-ct: application/json',
+      `x-relay-bind: ${proof.toString('base64')}`,
     ]))
     await waitFor(() => h.hits.length === 1, 'mux handshake forwarded')
     assert.equal(h.hits[0].method, 'GET', 'the read was forwarded')
@@ -338,6 +340,47 @@ await scenario('a traversal path cannot reach an API', async () => {
     h.pump.handleStreamData(26, request('GET', h.url('/assets/app.js'), ['Sec-Fetch-Dest: document']))
     await waitFor(() => h.hits.length === 1, 'a normal asset forwards')
     assert.equal(h.hits[0].url, '/assets/app.js')
+  } finally {
+    h.stop()
+  }
+})
+
+
+await scenario('a sealed read needs a proof the relay cannot mint', async () => {
+  const h = await harness((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json', 'content-length': '2' })
+    res.end('{}')
+  })
+  try {
+    // No proof at all: refused, nothing reaches the host.
+    h.pump.handleStreamData(31, request('GET', h.url('/api/sessions'), ['x-relay-enc: 1']))
+    await waitFor(() => h.closed.includes(31), 'a read without a proof is refused')
+    assert.equal(h.hits.length, 0, 'the host never saw it')
+
+    // A proof sealed for another path is a re-routing attempt.
+    const stolen = sealBound(h.box, 'GET', '/api/other', '', Buffer.alloc(8))
+    h.pump.handleStreamData(32, request('GET', h.url('/api/sessions'), [
+      'x-relay-enc: 1',
+      `x-relay-bind: ${stolen.toString('base64')}`,
+    ]))
+    await waitFor(() => h.closed.includes(32), 'a proof for another path is refused')
+    assert.equal(h.hits.length, 0, 'the host never saw it')
+
+    // A valid proof works once.
+    const proof = sealBound(h.box, 'GET', '/api/sessions', '', Buffer.alloc(8))
+    h.pump.handleStreamData(33, request('GET', h.url('/api/sessions'), [
+      'x-relay-enc: 1',
+      `x-relay-bind: ${proof.toString('base64')}`,
+    ]))
+    await waitFor(() => h.hits.length === 1, 'a valid proof forwards')
+
+    // The same header again is a replay: the nonce cache already covers it.
+    h.pump.handleStreamData(34, request('GET', h.url('/api/sessions'), [
+      'x-relay-enc: 1',
+      `x-relay-bind: ${proof.toString('base64')}`,
+    ]))
+    await waitFor(() => h.closed.includes(34), 'a replayed proof is refused')
+    assert.equal(h.hits.length, 1, 'the replay never reached the host')
   } finally {
     h.stop()
   }

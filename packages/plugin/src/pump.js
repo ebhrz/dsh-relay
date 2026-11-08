@@ -753,9 +753,58 @@ export class PumpManager {
     this.forwardSealed(sid, stream, plain)
   }
 
+  /**
+   * A sealed read has no body to bind, so the client proves it instead: a small
+   * sealed `{m,t}` envelope in `x-relay-bind`. Without it the relay could mint a
+   * GET of its own and make the host run it with the host cookie. Opening the
+   * proof also puts its nonce in the replay cache, so a captured header cannot
+   * be reused.
+   */
+  verifyReadProof(sid, stream) {
+    const info = stream.info
+    const header = info.headers.get('x-relay-bind')
+    if (!header) {
+      auditLog(`sealed read without a proof refused (${info.method} ${info.path})`)
+      this.respondInline(sid, 400, 'Bad Request', 'dsh-relay-phone: sealed reads need a proof header\n')
+      this.closeStream(sid)
+      return false
+    }
+    let sealed
+    try {
+      sealed = Buffer.from(String(header), 'base64')
+    } catch {
+      sealed = null
+    }
+    const proof = sealed && sealed.length >= SEALED_BODY_MIN
+      ? this.cryptoBox.open(this.cryptoBox.envelopeKey, sealed)
+      : null
+    if (!proof) {
+      auditLog(`sealed read with an unopenable proof refused (${info.path})`)
+      this.respondInline(sid, 400, 'Bad Request')
+      this.closeStream(sid)
+      return false
+    }
+    const { bound } = this.unwrapBound(proof)
+    if (!bound) {
+      auditLog(`sealed read with an unbound proof refused (${info.path})`)
+      this.respondInline(sid, 400, 'Bad Request')
+      this.closeStream(sid)
+      return false
+    }
+    const mismatch = this.boundMismatch(bound, info)
+    if (mismatch) {
+      auditLog(`sealed read proof mismatch: ${mismatch}`)
+      this.respondInline(sid, 400, 'Bad Request', 'dsh-relay-phone: sealed request was re-routed\n')
+      this.closeStream(sid)
+      return false
+    }
+    return true
+  }
+
   /** Send an opened (or bodyless) sealed request upstream and seal the response. */
   forwardSealed(sid, stream, plain, { responseOnly = false } = {}) {
     const info = stream.info
+    if (responseOnly && !this.verifyReadProof(sid, stream)) return
     const { body, bound } = this.unwrapBound(plain)
     if (bound) {
       const mismatch = this.boundMismatch(bound, info)
