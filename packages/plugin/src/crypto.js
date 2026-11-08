@@ -20,6 +20,10 @@ const sha256 = (...parts) => {
   return new Uint8Array(hash.digest())
 }
 
+// How many opened envelopes to remember for replay detection. 50k * ~70 B
+// is a few megabytes, and on a personal relay it covers weeks of traffic.
+const REPLAY_MEMORY = 50_000
+
 export class CryptoBox {
   constructor(identity, options = {}) {
     this.psk = Buffer.from(identity.psk, 'hex') // 32 bytes
@@ -39,7 +43,34 @@ export class CryptoBox {
     // page was reloaded). Persist the table beside identity.json so a restart
     // keeps phones paired.
     this.sessionsPath = options.sessionsPath ?? null
+    // Replay defence. Every envelope carries a fresh random nonce, so seeing the
+    // same nonce twice means the ciphertext was captured and re-submitted by
+    // someone who cannot forge one — the relay is exactly that someone. Remember
+    // what has been opened and refuse a repeat; the set is bounded by count (an
+    // entry falls out only after REPLAY_MEMORY newer envelopes), which for a
+    // personal relay is days of traffic.
+    this.openedNonces = new Set()
     this.#loadSessions()
+  }
+
+  /**
+   * False when this nonce has been opened before, i.e. the ciphertext is a copy.
+   * Bounded memory: oldest entries are dropped first, so a long-running process
+   * cannot grow without limit.
+   */
+  acceptNonce(nonce) {
+    const id = nonce.toString('hex')
+    if (this.openedNonces.has(id)) return false
+    this.openedNonces.add(id)
+    if (this.openedNonces.size > REPLAY_MEMORY) {
+      const excess = this.openedNonces.size - REPLAY_MEMORY
+      let dropped = 0
+      for (const old of this.openedNonces) {
+        this.openedNonces.delete(old)
+        if (++dropped >= excess) break
+      }
+    }
+    return true
   }
 
   #loadSessions() {
@@ -160,7 +191,12 @@ export class CryptoBox {
     const nonce = sealed.subarray(0, nacl.secretbox.nonceLength)
     const box = sealed.subarray(nacl.secretbox.nonceLength)
     const opened = nacl.secretbox.open(box, nonce, key)
-    return opened ? Buffer.from(opened) : null
+    if (!opened) return null
+    // A valid envelope that has been seen before is a replay: the relay recorded
+    // it and sent it again. Refusing it here covers every unseal path — HTTP
+    // bodies, the mobile RPC and websocket frames all come through `open`.
+    if (!this.acceptNonce(nonce)) return null
+    return Buffer.from(opened)
   }
 
   // -- shell signatures (Ed25519 over boot.js) --------------------------------

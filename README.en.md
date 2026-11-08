@@ -241,6 +241,7 @@ The bridge dials **out** to the relay, so your machine needs no public port and 
 | Relay abuse | Server starts with `--key`; an agent must prove knowledge of it with an HMAC challenge-response before registering |
 | Per-user limits | Each tenant key has one agent slot, a concurrent-stream cap (`429` past it), and a daily byte quota that cuts the connection at the limit |
 | Tenant isolation | A stream id is only valid on the connection that opened it: one tenant's agent cannot write into another tenant's phone stream or close it. Device ids are tenant-scoped, so two users may pick the same one |
+| Replay | Every envelope carries a random nonce and the host remembers the ones it opened (50k cap); a repeat is treated as a failed decryption. The client does the same for responses (20k) |
 | Scanner noise | Phone URLs carry `?g=<gate>`, derived from the device PSK; the relay drops requests without it before they reach your machine |
 | Phone ↔ desktop auth | The QR fragment carries the PSK; a two-step challenge-response (replay-resistant) exchanges it for an encrypted ticket cookie valid for 30 days |
 | Confidentiality | Every API request/response body and WebSocket frame is sealed with a key derived from the PSK (`tweetnacl` secretbox) |

@@ -115,11 +115,29 @@
     return out
   }
 
+  // The relay could re-submit an old response (stale approval result, stale
+  // session list). Refuse a nonce we have already opened; bounded for a phone.
+  var seenNonces = typeof Set === 'function' ? new Set() : null
+  var SEEN_LIMIT = 20000
+
   function openEnvelope(bytes) {
     try {
       if (bytes.length < 24 + 16) return null
-      var opened = nacl.secretbox.open(bytes.slice(24), bytes.slice(0, 24), envKey)
-      return opened ? new Uint8Array(opened) : null
+      var nonce = bytes.slice(0, 24)
+      var opened = nacl.secretbox.open(bytes.slice(24), nonce, envKey)
+      if (!opened) return null
+      if (seenNonces) {
+        var id = ''
+        for (var i = 0; i < 24; i++) id += (nonce[i] < 16 ? '0' : '') + nonce[i].toString(16)
+        if (seenNonces.has(id)) return null
+        seenNonces.add(id)
+        if (seenNonces.size > SEEN_LIMIT) {
+          var excess = seenNonces.size - SEEN_LIMIT
+          var it = seenNonces.values()
+          for (var d = 0; d < excess; d++) seenNonces.delete(it.next().value)
+        }
+      }
+      return new Uint8Array(opened)
     } catch (error) {
       return null
     }

@@ -15,6 +15,7 @@ const SUITE = [
   'compat.test.mjs',
   'keepalive.test.mjs',
   'pump-guard.test.mjs',
+  'replay.test.mjs',
   'mobile-patch.test.mjs',
   'mobile-bridge.test.mjs',
   'mobile-transport.test.mjs',

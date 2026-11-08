@@ -197,13 +197,31 @@ export function buildBootSource(id, gate) {
   var envKey = nacl.hash(new Uint8Array([].concat(Array.prototype.slice.call(psk),
       Array.prototype.slice.call(new TextEncoder().encode('envelope'))))).slice(0, 32)
 
+  // Replay defence on this side too: the relay could re-submit an old *response*
+  // (a stale approval result, a stale session list). Remember the nonces we have
+  // opened and refuse a repeat; bounded so a long session cannot grow forever.
+  var seenNonces = typeof Set === 'function' ? new Set() : null
+  var SEEN_LIMIT = 20000
+
   function openEnvelope(bytes) {
     try {
       if (bytes.length < 24 + 16) return null
       var nonce = bytes.slice(0, 24)
       var box = bytes.slice(24)
       var opened = nacl.secretbox.open(box, nonce, envKey)
-      return opened ? new Uint8Array(opened) : null
+      if (!opened) return null
+      if (seenNonces) {
+        var id = ''
+        for (var i = 0; i < 24; i++) id += (nonce[i] < 16 ? '0' : '') + nonce[i].toString(16)
+        if (seenNonces.has(id)) return null
+        seenNonces.add(id)
+        if (seenNonces.size > SEEN_LIMIT) {
+          var excess = seenNonces.size - SEEN_LIMIT
+          var it = seenNonces.values()
+          for (var d = 0; d < excess; d++) seenNonces.delete(it.next().value)
+        }
+      }
+      return new Uint8Array(opened)
     } catch (e) { return null }
   }
   function sealEnvelope(bytes) {
