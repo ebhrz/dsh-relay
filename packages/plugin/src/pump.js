@@ -439,7 +439,9 @@ export class PumpManager {
       auditLog(`relayed plaintext ${info.method} ${info.path} refused (sealed only)`)
       this.respondInline(
         sid, 403, 'Forbidden',
-        'dsh-relay-phone: only documents and static assets may travel unsealed\n',
+        'dsh-relay-phone: only documents and static assets may travel unsealed.\n' +
+        'The phone page seals everything it sends; if a desktop-UI request lands here, it bypassed the\n' +
+        'boot patch. Set "allowDesktopPlaintext": true in the plugin config to accept that risk.\n',
       )
       this.closeStream(sid)
       return
