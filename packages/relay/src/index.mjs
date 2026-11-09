@@ -443,9 +443,14 @@ class PhoneConn {
     // forwarded: a pooling proxy or a hostile agent must never hand one tenant's
     // request to another tenant's agent.
     this.scanner = new RequestScanner()
+    // Response bytes are watched only to learn whether an upgrade really
+    // happened: the stream becomes a tunnel when the agent answers 101, never
+    // because the request asked for one.
+    this.switchProbe = Buffer.alloc(0)
+    this.switchDecided = false
     socket.on('data', (chunk) => {
       if (this.closed || entry.ws.readyState !== 1) return
-      const { forward, refused } = this.scanner.feed(chunk, (head) => this.foreignRequest(head))
+      const { forward, refused } = this.scanner.feed(chunk, (candidate) => this.foreignRequest(candidate))
       if (forward.length > 0) {
         charge(entry, forward.length)
         if (this.closed) return
@@ -453,12 +458,10 @@ class PhoneConn {
       }
       if (refused) {
         log(`stream closed: ${refused}`)
-        // Forward is already the safe prefix; end the connection instead of
-        // serving the request to the wrong tenant.
-        try {
-          this.socket.once('error', () => { try { this.socket.destroy() } catch {} })
-          this.socket.end()
-        } catch {}
+        // destroy() ends gracefully after the bytes already forwarded and marks
+        // the stream closed, so a peer that keeps writing cannot slip more data
+        // past the check.
+        this.destroy(true)
       }
     })
     const finish = () => this.destroy(true)
@@ -480,19 +483,33 @@ class PhoneConn {
       if (forward.length > 0) sendStream(entry, sid, forward)
       if (refused) {
         log(`stream closed: ${refused}`)
-        try {
-          this.socket.once('error', () => { try { this.socket.destroy() } catch {} })
-          this.socket.end()
-        } catch {}
+        this.destroy(true)
       }
     }
+  }
+
+  /**
+   * Watch the first response bytes for `101 Switching Protocols`.
+   *
+   * An upgrade request alone does not make a tunnel: an agent that answers
+   * `200 OK` to it leaves the connection a perfectly ordinary HTTP socket, which
+   * a pooling proxy will happily reuse for another tenant's request. The scanner
+   * therefore stays in `await-switch` - and refuses anything that arrives there -
+   * until this sees the switch happen.
+   */
+  noteAgentBytes(chunk) {
+    if (this.switchDecided || !this.scanner?.awaitingSwitch) return
+    this.switchProbe = Buffer.concat([this.switchProbe, chunk]).subarray(0, 32)
+    if (this.switchProbe.length < 12) return
+    this.switchDecided = true
+    if (/^HTTP\/1\.1 101/.test(this.switchProbe.toString('latin1'))) this.scanner.allowTunnel()
   }
 
   /**
    * Why a request on this bound stream may not be forwarded, or null.
    *
    * The comparison is against the tenant this stream was routed to, so a second
-   * request that names anything else (or names nothing at all) is refused.
+   * request that names anything else - or carries no gate at all - is refused.
    */
   foreignRequest(head) {
     const identity = identityOfHead(head)
@@ -500,16 +517,19 @@ class PhoneConn {
     if (identity.id !== this.entry.id) {
       return `request for ${identity.id} on a stream bound to ${this.entry.id}`
     }
-    if (identity.gate && this.entry.gate && !timingSafeEqual(identity.gate, this.entry.gate)) {
-      return `gate mismatch for ${identity.id}`
+    // The first request proved the gate; a later one has to as well. A missing
+    // gate is not "same tenant by default" - it is an unproven request.
+    if (!identity.gate || !this.entry.gate || !timingSafeEqual(identity.gate, this.entry.gate)) {
+      return `missing or wrong gate for ${identity.id}`
     }
-    // Same tenant: allowed, so a client that ignores `Connection: close` still
-    // gets its keep-alive within its own deployment.
+    // Same tenant with the same gate: allowed, so a client that ignores
+    // `Connection: close` still gets its keep-alive within its own deployment.
     return null
   }
 
   sendToClient(chunk) {
     if (this.closed) return
+    this.noteAgentBytes(chunk)
     // A phone that opens a stream and then never reads must not make the relay
     // buffer it forever: past this much pending data the stream is dropped and
     // the agent is told, which is what a stalled HTTP client deserves.
@@ -836,13 +856,20 @@ function startAgentListener(args, tls) {
       return
     }
     agentSocketsByIp.set(ip, open)
+    // Release on the socket, not on the websocket: `handleUpgrade` answers a
+    // malformed request itself (400) and never calls back, so a ws-only hook would
+    // leak one slot per bad handshake until the address is locked out for good.
+    // The flag keeps the two paths from double-counting.
+    let released = false
     const release = () => {
+      if (released) return
+      released = true
       const left = (agentSocketsByIp.get(ip) ?? 1) - 1
       if (left <= 0) agentSocketsByIp.delete(ip)
       else agentSocketsByIp.set(ip, left)
     }
+    socket.once('close', release)
     wss.handleUpgrade(req, socket, head, (ws) => {
-      ws.once('close', release)
       wss.emit('connection', ws, req)
     })
   })

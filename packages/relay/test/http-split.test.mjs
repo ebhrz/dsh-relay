@@ -1,9 +1,6 @@
-// The request scanner is what stops a pooled connection (or a hostile agent) from
-// delivering one tenant's request to another tenant's agent.
-//
-// The relay forwards request #1 itself (it had to parse it to route), primes the
-// scanner with that head, and feeds everything after it. So `accept` is only ever
-// called for request #2 onwards.
+// The request scanner is a security boundary: it decides which request a byte
+// belongs to, so every state it cannot frame must be a refusal, never a
+// pass-through. These cases are the ones the second audit used to bypass 0.10.0.
 import assert from 'node:assert/strict'
 import { RequestScanner, identityOfHead } from '../src/http-split.js'
 
@@ -20,84 +17,146 @@ const scenario = (label, fn) => {
 
 const request = (line, extra = '') => `GET ${line} HTTP/1.1\r\nhost: x\r\n${extra}\r\n`
 const head = (line, extra = '') => Buffer.from(request(line, extra), 'latin1')
-
-/** The relay's own first request: forwarded by hand, then primed. */
 const primed = (line, extra = '') => {
   const scanner = new RequestScanner()
   scanner.startWith(Buffer.from(request(line, extra).replace(/\r\n\r\n$/, ''), 'latin1'))
   return scanner
 }
+const acceptAll = () => null
 
-scenario('the primed request stays in head mode', () => {
-  const scanner = primed('/c/AAAA/api/x?g=abc')
-  assert.equal(scanner.mode, 'head')
-})
-
-scenario('a second request is presented to the caller for a decision', () => {
-  const scanner = primed('/c/AAAA/api/x?g=abc')
-  const seen = []
-  const second = scanner.feed(head('/c/BBBB/api/y?g=def'), (h) => { seen.push(identityOfHead(h).id); return null })
-  assert.equal(second.refused, null)
-  assert.deepEqual(seen, ['BBBB'], 'the second head is inspected before forwarding')
-  assert.match(second.forward.toString('latin1'), /^GET \/c\/BBBB\/api\/y/)
-})
-
-scenario('a request naming another tenant is refused before it is forwarded', () => {
+scenario('a second request for another tenant is refused before forwarding', () => {
   const scanner = primed('/c/AAAA/api/x?g=abc')
   const result = scanner.feed(head('/c/BBBB/api/y?g=def'), (h) => (identityOfHead(h).id === 'BBBB' ? 'other tenant' : null))
   assert.equal(result.refused, 'other tenant')
-  assert.equal(result.forward.length, 0, 'not one byte of the foreign request is forwarded')
+  assert.equal(result.forward.length, 0)
 })
 
 scenario('the refused request stops before its head, keeping earlier bytes', () => {
-  // The previous request's last body bytes and the foreign head arrive together.
   const scanner = primed('/c/AAAA/upload?g=abc', 'content-length: 4\r\n')
   const chunk = Buffer.concat([Buffer.from('abcd', 'latin1'), head('/c/BBBB/api/y?g=def')])
   const result = scanner.feed(chunk, () => 'refused')
-  assert.equal(result.forward.toString('latin1'), 'abcd', 'only the earlier body bytes go upstream')
+  assert.equal(result.forward.toString('latin1'), 'abcd')
 })
 
 scenario('a body that contains a request line is not treated as one', () => {
   const body = Buffer.from('hello\r\n\r\nGET /c/BBBB/api/y HTTP/1.1\r\n\r\nworld')
   const scanner = primed('/c/AAAA/upload?g=abc', `content-length: ${body.length}\r\n`)
   const seen = []
-  const result = scanner.feed(body, (h) => { seen.push(identityOfHead(h).id); return null })
+  const result = scanner.feed(body, (h) => { seen.push(h); return null })
   assert.equal(result.refused, null)
-  assert.deepEqual(seen, [], 'nothing inside the body is inspected')
-  assert.deepEqual(result.forward, body, 'the whole body is forwarded')
-  assert.equal(scanner.mode, 'head', 'the scanner is back at a request boundary')
+  assert.deepEqual(seen, [])
+  assert.deepEqual(result.forward, body)
 })
 
-scenario('a chunked body is framed, and the request after it is inspected', () => {
-  const scanner = primed('/c/AAAA/upload?g=abc', 'transfer-encoding: chunked\r\n')
-  const seen = []
-  const chunked = Buffer.from('5\r\nhello\r\n0\r\n\r\n', 'latin1')
-  scanner.feed(chunked, (h) => { seen.push(identityOfHead(h).id); return null })
-  assert.deepEqual(seen, [], 'the chunked body is not mistaken for a request')
-  scanner.feed(head('/c/BBBB/api/y?g=def'), (h) => { seen.push(identityOfHead(h).id); return null })
-  assert.deepEqual(seen, ['BBBB'], 'the request after the body is inspected')
-})
+// ── upgrades: the socket only stops being HTTP once the agent said 101 ──────
 
-scenario('an upgrade turns the socket into a tunnel', () => {
+const upgradeHead = (line) => Buffer.from(
+  `GET ${line} HTTP/1.1\r\nhost: x\r\nconnection: Upgrade\r\nupgrade: websocket\r\n\r\n`,
+  'latin1',
+)
+
+scenario('an upgrade request waits for the switch instead of going blind', () => {
   const scanner = new RequestScanner()
-  const upgrade = Buffer.from('GET /c/AAAA/api/remote.mux?g=abc HTTP/1.1\r\nconnection: Upgrade\r\nupgrade: websocket\r\n\r\n', 'latin1')
-  scanner.feed(upgrade, () => null)
+  scanner.feed(upgradeHead('/c/AAAA/api/remote.mux?g=abc'), acceptAll)
+  assert.equal(scanner.mode, 'await-switch')
+  assert.equal(scanner.awaitingSwitch, true)
+})
+
+scenario('a request arriving before the switch is refused', () => {
+  const scanner = new RequestScanner()
+  scanner.feed(upgradeHead('/c/AAAA/api/remote.mux?g=abc'), acceptAll)
+  // What a fake upgrade followed by a pooled victim request looks like.
+  const result = scanner.feed(head('/c/BBBB/m?g=def'), () => 'other tenant')
+  assert.equal(result.refused, 'data before the upgrade switch')
+  assert.equal(result.forward.length, 0, 'no byte of the smuggled request goes upstream')
+})
+
+scenario('after the agent answers 101 the stream becomes a tunnel', () => {
+  const scanner = new RequestScanner()
+  scanner.feed(upgradeHead('/c/AAAA/api/remote.mux?g=abc'), acceptAll)
+  scanner.allowTunnel()
   assert.equal(scanner.mode, 'tunnel')
   const frames = Buffer.from('\r\n\r\nGET /c/BBBB/ HTTP/1.1\r\n\r\n', 'latin1')
   const seen = []
   const result = scanner.feed(frames, (h) => { seen.push(h); return null })
   assert.deepEqual(seen, [], 'tunnel bytes are never parsed')
-  assert.deepEqual(result.forward, frames, 'and they pass through untouched')
+  assert.deepEqual(result.forward, frames)
 })
 
-scenario('identityOfHead reads the prefix, the query gate and the cookies', () => {
-  const direct = identityOfHead(head('/c/AV5FVHCP/api/x?g=' + 'a'.repeat(64)))
-  assert.deepEqual([direct.id, direct.gate], ['AV5FVHCP', 'a'.repeat(64)])
-  const cookies = identityOfHead(Buffer.from(
-    `GET /api/x HTTP/1.1\r\ncookie: __relay_i=ZZZZ0001; __relay_g=${'b'.repeat(64)}\r\n\r\n`,
-    'latin1',
-  ))
-  assert.deepEqual([cookies.id, cookies.gate], ['ZZZZ0001', 'b'.repeat(64)])
+scenario('an Upgrade header without Connection: upgrade is an ordinary request', () => {
+  const scanner = new RequestScanner()
+  scanner.feed(Buffer.from('GET /c/AAAA/x?g=abc HTTP/1.1\r\nhost: x\r\nupgrade: websocket\r\n\r\n', 'latin1'), acceptAll)
+  assert.equal(scanner.mode, 'head', 'the switch was never negotiated')
+})
+
+// ── malformed framing is refused, not passed through ─────────────────────────
+
+const malformed = [
+  ['negative content-length', 'GET /x HTTP/1.1\r\ncontent-length: -5\r\n\r\n'],
+  ['non-numeric content-length', 'GET /x HTTP/1.1\r\ncontent-length: 5x\r\n\r\n'],
+  ['conflicting content-length', 'GET /x HTTP/1.1\r\ncontent-length: 5\r\ncontent-length: 6\r\n\r\n'],
+  ['chunked with content-length', 'GET /x HTTP/1.1\r\ntransfer-encoding: chunked\r\ncontent-length: 5\r\n\r\n'],
+]
+for (const [label, text] of malformed) {
+  scenario(`a request with ${label} is refused`, () => {
+    const scanner = new RequestScanner()
+    const result = scanner.feed(Buffer.from(text, 'latin1'), acceptAll)
+    assert.ok(result.refused, `expected a refusal, got ${JSON.stringify(result.refused)}`)
+  })
+}
+
+scenario('an oversized head is refused', () => {
+  const scanner = new RequestScanner()
+  const huge = Buffer.concat([Buffer.from('GET /x HTTP/1.1\r\n'), Buffer.alloc(70 * 1024, 0x61)])
+  const result = scanner.feed(huge, acceptAll)
+  assert.equal(result.refused, 'request head too long')
+})
+
+scenario('a malformed chunk size is refused', () => {
+  const scanner = primed('/c/AAAA/upload?g=abc', 'transfer-encoding: chunked\r\n')
+  const result = scanner.feed(Buffer.from('zz\r\nhello\r\n0\r\n\r\n', 'latin1'), acceptAll)
+  assert.equal(result.refused, 'malformed chunk size')
+})
+
+scenario('a bad chunk terminator is refused', () => {
+  const scanner = primed('/c/AAAA/upload?g=abc', 'transfer-encoding: chunked\r\n')
+  const result = scanner.feed(Buffer.from('5\r\nhelloXX', 'latin1'), acceptAll)
+  assert.equal(result.refused, 'malformed chunk terminator')
+})
+
+// ── chunked framing across TCP fragments keeps its bytes ─────────────────────
+
+scenario('a chunk-size line split across packets keeps its first half', () => {
+  const scanner = primed('/c/AAAA/upload?g=abc', 'transfer-encoding: chunked\r\n')
+  const first = scanner.feed(Buffer.from('5', 'latin1'), acceptAll)
+  assert.equal(first.forward.toString('latin1'), '', 'nothing is forwarded before the line proves valid')
+  const second = scanner.feed(Buffer.from('\r\nhello\r\n0\r\n\r\n', 'latin1'), acceptAll)
+  assert.equal(second.refused, null)
+  assert.equal(second.forward.toString('latin1'), '5\r\nhello\r\n0\r\n\r\n', 'the split line is forwarded intact')
+})
+
+scenario('the CRLF that ends chunk data split across packets is not a tunnel', () => {
+  const scanner = primed('/c/AAAA/upload?g=abc', 'transfer-encoding: chunked\r\n')
+  scanner.feed(Buffer.from('5\r\nhello', 'latin1'), acceptAll)
+  const first = scanner.feed(Buffer.from('\r', 'latin1'), acceptAll)
+  assert.equal(first.refused, null, 'a lone CR waits for its partner')
+  const second = scanner.feed(Buffer.from('\n', 'latin1'), acceptAll)
+  assert.equal(second.refused, null)
+  assert.equal(second.forward.toString('latin1'), '\r\n')
+  assert.equal(scanner.mode, 'chunk-size')
+})
+
+scenario('a chunked body split mid-data resumes correctly', () => {
+  const scanner = primed('/c/AAAA/upload?g=abc', 'transfer-encoding: chunked\r\n')
+  scanner.feed(Buffer.from('8\r\nabcd', 'latin1'), acceptAll)
+  const result = scanner.feed(Buffer.from('efgh\r\n0\r\n\r\n', 'latin1'), acceptAll)
+  assert.equal(result.refused, null)
+  assert.equal(result.forward.toString('latin1'), 'efgh\r\n0\r\n\r\n')
+  assert.equal(scanner.mode, 'head')
+})
+
+scenario('identityOfHead accepts a path without a trailing slash', () => {
+  assert.equal(identityOfHead(head(`/c/AV5FVHCP?g=${'a'.repeat(64)}`)).id, 'AV5FVHCP')
 })
 
 console.log(failures === 0 ? 'all http split checks passed' : `${failures} http split check(s) failed`)

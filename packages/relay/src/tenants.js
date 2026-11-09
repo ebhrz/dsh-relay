@@ -120,7 +120,16 @@ export class TenantStore {
     }
     const seen = new Set()
     for (const record of raw.tenants ?? []) {
-      const next = normalize(record, this.quotaDefault, this.maxStreamsDefault)
+      // One corrupt record (a hand-edited ledger, a half-finished migration) must
+      // not throw from the reload timer or from every hello: skip it and keep the
+      // rest of the registry working.
+      let next
+      try {
+        next = normalize(record, this.quotaDefault, this.maxStreamsDefault)
+      } catch (error) {
+        console.error(`tenant store: skipping record: ${error.message}`)
+        continue
+      }
       const live = this.tenants.get(next.id)
       if (live) {
         // A rotated key changes keyId. Connections opened with the old key must
@@ -132,6 +141,11 @@ export class TenantStore {
         live.note = next.note
         live.keyId = next.keyId
         live.secret = next.secret
+        // Both halves of the v2 derivation have to travel together: a live tenant
+        // left on v1 with no legacy secret would advertise a version it cannot
+        // verify after the key was rotated underneath it.
+        live.legacySecret = next.legacySecret
+        live.proofVersion = next.proofVersion
         if (next.day > live.day) {
           live.day = next.day
           live.usedBytesDay = next.usedBytesDay

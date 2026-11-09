@@ -10,6 +10,7 @@ import { execFileSync, spawn } from 'node:child_process'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import net from 'node:net'
+import tls from 'node:tls'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -548,6 +549,82 @@ await scenario('an agent that only knows the v1 proof secret is still accepted',
     assert.ok(newAgent.registered, 'the v2 proof is accepted as well')
   } finally {
     relay.stop()
+  }
+})
+
+await scenario('a fake upgrade answered with 200 does not open a tunnel', async () => {
+  // The second audit's bypass: request an upgrade, have the (attacker's) agent
+  // answer 200 OK, and a pooling proxy treats the socket as reusable - so the
+  // victim's next request lands on it. The relay now only stops inspecting after
+  // a real 101.
+  const relay = await startRelay()
+  try {
+    const evil = relay.tenant('evil')
+    const good = relay.tenant('victim')
+    const evilAgent = await registerAgent(relay, 'EVIL0001', { key: evil.key, gate: GATE_A })
+    const victimAgent = await registerAgent(relay, 'VICTIM01', { key: good.key, gate: GATE_B })
+
+    const socket = net.connect({ host: '127.0.0.1', port: relay.phonePort })
+    relay.sockets.push(socket)
+    socket.on('error', () => {})
+    // A paused socket never sees the FIN, so the "connection was cut" check has
+    // to read.
+    socket.resume()
+    await new Promise((resolve) => socket.once('connect', resolve))
+
+    socket.write(`GET /c/EVIL0001/x?g=${GATE_A} HTTP/1.1\r\nhost: x\r\nconnection: Upgrade\r\nupgrade: websocket\r\n\r\n`)
+    const upgradeFrame = await firstFrame(evilAgent)
+    const sid = upgradeFrame.readUInt32BE(0)
+    // Not a 101: the switch never happens, so the socket stays an HTTP connection.
+    evilAgent.ws.send(Buffer.concat([
+      Buffer.from([sid >>> 24 & 0xff, sid >>> 16 & 0xff, sid >>> 8 & 0xff, sid & 0xff]),
+      Buffer.from('HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: 2\r\nconnection: keep-alive\r\n\r\nok', 'latin1'),
+    ]))
+    await new Promise((done) => setTimeout(done, 200))
+
+    const before = evilAgent.frames.length
+    socket.write(`GET /c/VICTIM01/m?g=${GATE_B} HTTP/1.1\r\nhost: x\r\n\r\n`)
+    try {
+      await waitFor(() => socket.destroyed || socket.readableEnded, 'the reused connection is cut', 5000)
+    } catch (error) {
+      console.log('debug relay log:\n' + relay.log().split('\n').slice(-12).join('\n'))
+      console.log('debug socket:', { destroyed: socket.destroyed, ended: socket.readableEnded, frames: evilAgent.frames.length })
+      throw error
+    }
+    await new Promise((done) => setTimeout(done, 200))
+
+    const leaked = evilAgent.frames.slice(before).map((frame) => frame.toString('latin1')).join('')
+    assert.equal(leaked.includes('VICTIM01'), false, "the victim's request never reached the evil agent")
+    assert.equal(victimAgent.frames.length, 0, 'and never reached its own agent either')
+  } finally {
+    relay.stop()
+  }
+})
+
+await scenario('malformed upgrade attempts do not lock the address out', async () => {
+  // Each bad handshake used to leak one slot, so 32 of them permanently blocked
+  // every agent behind that address.
+  const previous = process.env.DSH_RELAY_AGENT_SOCKETS_PER_IP
+  process.env.DSH_RELAY_AGENT_SOCKETS_PER_IP = '4'
+  const relay = await startRelay()
+  try {
+    for (let i = 0; i < 12; i += 1) {
+      const raw = tls.connect({ host: '127.0.0.1', port: relay.agentPort, rejectUnauthorized: false })
+      relay.sockets.push(raw)
+      raw.on('error', () => {})
+      await new Promise((resolve) => raw.once('secureConnect', resolve))
+      // No Sec-WebSocket-Key: ws answers 400 itself and never calls the upgrade
+      // callback, which is exactly the path that leaked.
+      raw.write('GET /agent HTTP/1.1\r\nhost: x\r\nconnection: Upgrade\r\nupgrade: websocket\r\n\r\n')
+      await new Promise((done) => { raw.once('close', done); setTimeout(done, 300) })
+    }
+    const created = relay.tenant('after-bad')
+    const agent = await registerAgent(relay, 'AFTERBAD', { key: created.key, gate: GATE_A })
+    assert.ok(agent.registered, 'a legitimate agent still registers after 12 malformed upgrades')
+  } finally {
+    relay.stop()
+    if (previous === undefined) delete process.env.DSH_RELAY_AGENT_SOCKETS_PER_IP
+    else process.env.DSH_RELAY_AGENT_SOCKETS_PER_IP = previous
   }
 })
 
