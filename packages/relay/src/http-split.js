@@ -116,29 +116,22 @@ export class RequestScanner {
         const line = Buffer.concat([this.held, chunk.subarray(offset, end)])
         const head = Buffer.concat([this.held, chunk.subarray(offset, end + 2)])
         this.held = Buffer.alloc(0)
-        // The bytes that preceded this line belong to the body framing too, so
-        // they are forwarded only after the line proved valid.
-        out.push(head)
-        const size = Number.parseInt(line.toString('latin1').split(';')[0].trim(), 16)
-        if (!Number.isFinite(size) || size < 0) {
+        // Strict hex only: `parseInt` accepts `0x10`, `0xyz` and `-0`, and any
+        // disagreement with the upstream parser is a smuggling primitive. The
+        // bytes are forwarded only after the size line proved valid.
+        const token = line.toString('latin1').split(';')[0].trim()
+        if (!/^[0-9a-fA-F]{1,12}$/.test(token)) {
           return { forward: Buffer.concat(out), refused: 'malformed chunk size', head: null }
         }
+        out.push(head)
+        const size = Number.parseInt(token, 16)
         offset = end + 2
         if (size === 0) {
-          // Last chunk: optional trailers, then a blank line.
-          const tail = chunk.indexOf('\r\n', offset)
-          if (tail === -1) {
-            this.held = chunk.subarray(offset)
-            if (this.held.length > MAX_HEAD) {
-              return { forward: Buffer.concat(out), refused: 'chunk trailer too long', head: null }
-            }
-            this.mode = 'trailer'
-            offset = chunk.length
-            continue
-          }
-          out.push(chunk.subarray(offset, tail + 2))
-          offset = tail + 2
-          this.mode = 'head'
+          // The last chunk is followed by optional trailers and then a blank
+          // line. The trailer state consumes those lines one by one; taking a
+          // shortcut here (consuming one line and going back to `head`) let a
+          // crafted trailer line be parsed as the next request.
+          this.mode = 'trailer'
         } else {
           this.remaining = size
           this.mode = 'chunk-data'
@@ -181,10 +174,13 @@ export class RequestScanner {
         // Nothing of this request goes upstream - not even its head.
         return { forward: Buffer.concat(out), refused: refusal, head }
       }
-      out.push(Buffer.concat([head, Buffer.from('\r\n\r\n', 'latin1')]))
-      offset = end + 4
+      // Frame the body BEFORE forwarding the head: a head the scanner cannot
+      // frame must not reach the agent, or the relay has forwarded a request it
+      // does not understand and the next bytes get misattributed.
       const error = this.#startBody(head)
       if (error) return { forward: Buffer.concat(out), refused: error, head }
+      out.push(Buffer.concat([head, Buffer.from('\r\n\r\n', 'latin1')]))
+      offset = end + 4
     }
     return { forward: Buffer.concat(out), refused: null, head: null }
   }
@@ -246,6 +242,12 @@ export class RequestScanner {
 export function identityOfHead(head) {
   const text = head.toString('latin1')
   const line = text.split('\r\n')[0]
+  // A head is only a request if its first line is one. Without this check an
+  // ordinary header line such as `X-B: /c/evil/x?g=...` would be read as a
+  // request line and could name another tenant.
+  if (!/^[A-Z]+ \S+ HTTP\/1\.[01]$/.test(line)) {
+    return { id: '', gate: '', path: '', valid: false }
+  }
   const space = line.indexOf(' ')
   const target = space === -1 ? '' : line.slice(space + 1).split(' ')[0]
   const q = target.indexOf('?')
@@ -260,5 +262,6 @@ export function identityOfHead(head) {
     id: prefixed?.[1] ?? cookieId,
     gate: queryGate || cookieGate,
     path,
+    valid: true,
   }
 }

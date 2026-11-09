@@ -83,15 +83,25 @@ export class TenantStore {
   }
 
   load() {
-    try {
-      const raw = JSON.parse(fs.readFileSync(this.file, 'utf8'))
-      for (const tenant of raw.tenants ?? []) {
-        this.tenants.set(tenant.id, normalize(tenant, this.quotaDefault, this.maxStreamsDefault))
+    const raw = (() => {
+      try {
+        return JSON.parse(fs.readFileSync(this.file, 'utf8'))
+      } catch (error) {
+        if (error.code !== 'ENOENT') console.error(`tenant store: ${error.message}`)
+        return null
       }
-      this.mtimeMs = this.statMtime()
-    } catch (error) {
-      if (error.code !== 'ENOENT') console.error(`tenant store: ${error.message}`)
+    })()
+    if (!raw) return
+    for (const tenant of raw.tenants ?? []) {
+      // One corrupt record must not take the whole registry with it: skip it, say
+      // so, and let every other tenant keep working.
+      try {
+        this.tenants.set(tenant.id, normalize(tenant, this.quotaDefault, this.maxStreamsDefault))
+      } catch (error) {
+        console.error(`tenant store: skipping record: ${error.message}`)
+      }
     }
+    this.mtimeMs = this.statMtime()
   }
 
   statMtime() {

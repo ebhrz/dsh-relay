@@ -159,5 +159,60 @@ scenario('identityOfHead accepts a path without a trailing slash', () => {
   assert.equal(identityOfHead(head(`/c/AV5FVHCP?g=${'a'.repeat(64)}`)).id, 'AV5FVHCP')
 })
 
+// ── the third audit's two desync routes ─────────────────────────────────────
+
+scenario('chunked trailers cannot smuggle a request header', () => {
+  // A crafted trailer line used to be consumed as the end of the body and the
+  // rest of the trailer block parsed as the next request head.
+  const scanner = primed('/c/AAAA/upload?g=abc', 'transfer-encoding: chunked\r\n')
+  const gate = 'e'.repeat(64)
+  const crafted = `0\r\nX-A: 1\r\nX-B: /c/EEEE0000/x?g=${gate}\r\nContent-Length: 999999\r\n\r\n`
+  const result = scanner.feed(Buffer.from(crafted, 'latin1'), () => null)
+  assert.equal(result.refused, null, 'a legal trailer block is not itself an error')
+  assert.equal(scanner.mode, 'head', 'the body ended; the scanner is not inside a fake body')
+  assert.equal(scanner.remaining, 0, 'no fake Content-Length leaked out of the trailer')
+
+  const seen = []
+  scanner.feed(head('/c/BBBB/m?g=def'), (h) => { seen.push(identityOfHead(h).id); return 'other tenant' })
+  assert.deepEqual(seen, ['BBBB'], 'the next real request is still inspected')
+})
+
+scenario('a first request that cannot be framed is an error, not a default', () => {
+  const scanner = new RequestScanner()
+  const error = scanner.startWith(Buffer.from(
+    'POST /c/AAAA/upload HTTP/1.1\r\ntransfer-encoding: chunked\r\ncontent-length: 5\r\n',
+    'latin1',
+  ))
+  assert.equal(error, 'both transfer-encoding and content-length')
+  assert.notEqual(scanner.mode, 'body', 'the scanner does not invent a body length')
+})
+
+scenario('a second request with unframeable headers is not forwarded', () => {
+  const scanner = primed('/c/AAAA/api/x?g=abc')
+  const result = scanner.feed(
+    Buffer.from('POST /c/AAAA/upload?g=abc HTTP/1.1\r\ntransfer-encoding: chunked\r\ncontent-length: 5\r\n\r\n', 'latin1'),
+    () => null,
+  )
+  assert.equal(result.refused, 'both transfer-encoding and content-length')
+  assert.equal(result.forward.length, 0, 'the head did not reach the agent')
+})
+
+for (const [label, size] of [['0x10', '0x10'], ['negative', '-0'], ['trailing garbage', '0xyz']]) {
+  scenario(`a chunk size of ${label} is refused`, () => {
+    const scanner = primed('/c/AAAA/upload?g=abc', 'transfer-encoding: chunked\r\n')
+    const result = scanner.feed(Buffer.from(`${size}\r\nhello\r\n0\r\n\r\n`, 'latin1'), acceptAll)
+    assert.equal(result.refused, 'malformed chunk size')
+  })
+}
+
+scenario('a header line is not accepted as a request line', () => {
+  const parsed = identityOfHead(Buffer.from(
+    `X-B: /c/EEEE0000/x?g=${'e'.repeat(64)}\r\ncontent-length: 5\r\n\r\n`,
+    'latin1',
+  ))
+  assert.equal(parsed.valid, false)
+  assert.equal(parsed.id, '', 'no tenant is extracted from a header line')
+})
+
 console.log(failures === 0 ? 'all http split checks passed' : `${failures} http split check(s) failed`)
 process.exit(failures === 0 ? 0 : 1)

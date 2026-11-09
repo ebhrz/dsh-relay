@@ -628,5 +628,74 @@ await scenario('malformed upgrade attempts do not lock the address out', async (
   }
 })
 
+await scenario('a crafted chunked trailer cannot capture the next request', async () => {
+  // The third audit's desync: a trailer line was consumed as the end of the body
+  // and the rest of the trailer block parsed as the next request head.
+  const relay = await startRelay()
+  try {
+    const evil = relay.tenant('trailer-evil')
+    const good = relay.tenant('trailer-victim')
+    const evilAgent = await registerAgent(relay, 'TREVIL01', { key: evil.key, gate: GATE_A })
+    const victimAgent = await registerAgent(relay, 'TRVICT01', { key: good.key, gate: GATE_B })
+
+    const socket = net.connect({ host: '127.0.0.1', port: relay.phonePort })
+    relay.sockets.push(socket)
+    socket.on('error', () => {})
+    socket.resume()
+    await new Promise((resolve) => socket.once('connect', resolve))
+
+    const crafted = [
+      `POST /c/TREVIL01/upload?g=${GATE_A} HTTP/1.1`,
+      'host: x',
+      'transfer-encoding: chunked',
+      '',
+      '0',
+      'X-A: 1',
+      `X-B: /c/TRVICT01/x?g=${GATE_B}`,
+      'Content-Length: 999999',
+      '',
+      '',
+    ].join('\r\n')
+    socket.write(crafted)
+    await new Promise((done) => setTimeout(done, 150))
+
+    const before = evilAgent.frames.map((frame) => frame.toString('latin1')).join('').length
+    socket.write(`GET /c/TRVICT01/m?g=${GATE_B} HTTP/1.1\r\nhost: x\r\ncookie: __relay_t=secret\r\n\r\n`)
+    await waitFor(() => socket.destroyed || socket.readableEnded, 'the connection is cut', 5000)
+    await new Promise((done) => setTimeout(done, 200))
+
+    const afterEvil = evilAgent.frames.map((frame) => frame.toString('latin1')).join('')
+    // The trailer text itself is part of the upload the client sent, so the evil
+    // agent legitimately sees it. What must never arrive is the victim's *request*.
+    assert.ok(before > 0, 'the honest upload head reached the agent')
+    assert.equal(afterEvil.includes('GET /c/TRVICT01/m'), false, "the victim's request never reached the evil agent")
+    assert.equal(afterEvil.includes('__relay_t=secret'), false, "and neither did the victim's cookie")
+    assert.equal(victimAgent.frames.length, 0, "the victim's agent never saw the smuggled request")
+  } finally {
+    relay.stop()
+  }
+})
+
+await scenario('a first request with broken body framing is refused outright', async () => {
+  const relay = await startRelay()
+  try {
+    const created = relay.tenant('broken-first')
+    const agent = await registerAgent(relay, 'BROKEN01', { key: created.key, gate: GATE_A })
+    const socket = net.connect({ host: '127.0.0.1', port: relay.phonePort })
+    relay.sockets.push(socket)
+    socket.on('error', () => {})
+    socket.resume()
+    await new Promise((resolve) => socket.once('connect', resolve))
+    // Both framings at once: the scanner cannot know where the body ends, so the
+    // request must not be forwarded with its body parsed as the next request.
+    socket.write(`POST /c/BROKEN01/upload?g=${GATE_A} HTTP/1.1\r\nhost: x\r\ntransfer-encoding: chunked\r\ncontent-length: 5\r\n\r\nGET /c/OTHER01/ HTTP/1.1\r\n\r\n`)
+    await waitFor(() => socket.destroyed || socket.readableEnded, 'the connection is cut', 5000)
+    assert.equal(agent.frames.length, 0, 'the agent received nothing')
+    assert.match(relay.log(), /both transfer-encoding and content-length/)
+  } finally {
+    relay.stop()
+  }
+})
+
 console.log(failures === 0 ? 'all relay security checks passed' : `${failures} relay security check(s) failed`)
 process.exit(failures === 0 ? 0 : 1)

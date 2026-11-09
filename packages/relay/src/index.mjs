@@ -473,11 +473,19 @@ class PhoneConn {
     const head = Buffer.isBuffer(firstLine) ? firstLine : Buffer.from(firstLine, 'latin1')
     charge(entry, head.length + remainder.length)
     if (this.closed) return
-    sendStream(entry, sid, head)
-    // Prime the framing with the request the relay already routed, then feed what
-    // arrived behind it (a body, or a pipelined request that must be checked).
+    // Prime the framing BEFORE forwarding: a first request the scanner cannot
+    // frame would otherwise leave it in `head` mode, and that request's body would
+    // be parsed as the next request head.
     const headWithoutTail = head.subarray(0, Math.max(0, head.length - 4))
-    this.scanner.startWith(headWithoutTail)
+    const startRefused = this.scanner.startWith(headWithoutTail)
+    if (startRefused) {
+      log(`stream closed: ${startRefused}`)
+      this.destroy(true)
+      return
+    }
+    sendStream(entry, sid, head)
+    // The bytes that arrived behind the head are a body, or a pipelined request
+    // that must be checked like any other.
     if (remainder.length > 0) {
       const { forward, refused } = this.scanner.feed(remainder, (candidate) => this.foreignRequest(candidate))
       if (forward.length > 0) sendStream(entry, sid, forward)
