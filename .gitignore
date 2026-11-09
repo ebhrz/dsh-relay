@@ -18,3 +18,4 @@ certs/
 *.pem
 *.key
 *identity.json
+packages/relay/.tmp-*
