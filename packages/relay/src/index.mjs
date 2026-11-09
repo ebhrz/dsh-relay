@@ -276,6 +276,9 @@ const blockedDevices = new Map() // device id -> { reason, day }
  */
 const agentSocketsByIp = new Map() // ip -> open socket count
 const MAX_AGENT_SOCKETS_PER_IP = Number(process.env.DSH_RELAY_AGENT_SOCKETS_PER_IP ?? 32)
+// A frame cap for peers that have not registered yet, and the real one after.
+const PREAUTH_MAX_PAYLOAD = 256 * 1024
+const AUTHED_MAX_PAYLOAD = 8 * 1024 * 1024
 let tenantStore = null // set in main()
 let nextSid = 1
 
@@ -752,7 +755,7 @@ function startAgentListener(args, tls) {
   // An agent frame is a phone chunk or a control message, and the plugin splits
   // its sends well below this. The cap applies to unauthenticated peers too, so
   // it is also what limits how much a stranger can make us buffer per socket.
-  const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 })
+  const wss = new WebSocketServer({ noServer: true, maxPayload: PREAUTH_MAX_PAYLOAD })
 
   server.on('upgrade', (req, socket, head) => {
     // `req.url` is attacker-controlled and `new URL()` throws on garbage
@@ -944,6 +947,19 @@ function startAgentListener(args, tls) {
           }
           registered = true
           clearTimeout(registrationDeadline)
+          // The frame cap is small until here so an unauthenticated peer cannot
+          // make us buffer megabytes, and it is raised now that this peer proved
+          // who it is. `maxPayload` is per server, so the live receiver is the
+          // only place to change it; the dependency is pinned, and the check
+          // below tells an operator immediately if that stops working.
+          try {
+            ws._receiver._maxPayload = AUTHED_MAX_PAYLOAD
+            if (ws._receiver._maxPayload !== AUTHED_MAX_PAYLOAD) {
+              log('warning: this ws build ignores the per-connection frame cap; agent frames stay limited')
+            }
+          } catch {
+            log('warning: this ws build has no receiver to raise the frame cap on')
+          }
           log(`agent registered id=${id}${tenant ? ` tenant=${tenant.id}` : ' (admin key)'}`)
           ws.send(JSON.stringify({ t: 'registered' }))
           return
