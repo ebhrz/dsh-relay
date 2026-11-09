@@ -721,7 +721,11 @@ export class PumpManager {
       return index === -1 ? [value, ''] : [value.slice(0, index), value.slice(index + 1)]
     }
     const [outerPath, outerQuery] = splitTarget(info.target ?? info.path)
-    const [innerPath, innerQuery] = splitTarget(String(bound.t))
+    // A browser that resolved a relative URL against the page seals the relay
+    // prefix too (`/c/<id>/api/x`); strip it the same way the router does. The
+    // sealed value still names the method and path, so this removes no authority.
+    const sealedTarget = String(bound.t).replace(/^\/c\/[A-Za-z0-9]{4,16}(?=\/|$)/, '') || '/'
+    const [innerPath, innerQuery] = splitTarget(sealedTarget)
     if (outerPath !== innerPath) {
       return `path ${outerPath.slice(0, 60)} != sealed ${innerPath.slice(0, 60)}`
     }

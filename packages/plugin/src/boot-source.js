@@ -246,6 +246,24 @@ export function buildBootSource(id, gate) {
   }
 
   var BOUND = 0x02
+
+  // The target the host will see, not the URL the browser resolved.
+  //
+  // DSH calls relative URLs (for example api/session/list), which resolve against
+  // the page at /c/<id>/ and come back with the relay prefix attached. The host
+  // strips that prefix before comparing, so the sealed value must be stripped
+  // too - a prefix the client adds and the host removes is a guaranteed mismatch.
+  function boundTarget(absolute) {
+    var path = absolute.pathname
+    if (PREFIX && path.indexOf(PREFIX) === 0) path = path.slice(PREFIX.length) || '/'
+    var search = absolute.search
+    if (search) {
+      var parts = search.slice(1).split('&').filter(function (part) { return part.indexOf('g=') !== 0 })
+      search = parts.length > 0 && parts[0] !== '' ? '?' + parts.join('&') : ''
+    }
+    return path + search
+  }
+
   function sealBound(method, target, contentType, bytes) {
     var enc = new TextEncoder()
     var header = enc.encode(JSON.stringify({ m: method, t: target, c: contentType || '' }))
@@ -385,7 +403,7 @@ export function buildBootSource(id, gate) {
           // with the host cookie.
           headers.set('x-relay-bind', bytesToBase64(sealBound(
             options.method || 'GET',
-            absolute.pathname + absolute.search,
+            boundTarget(absolute),
             '',
             new Uint8Array(8).fill(0),
           )))
@@ -404,7 +422,7 @@ export function buildBootSource(id, gate) {
           // Bind the body to the request it was made for: method, path+query and
           // content-type travel inside the envelope, so the relay cannot re-route
           // a captured request to another endpoint.
-          body: sealBound(options.method || 'GET', absolute.pathname + absolute.search, contentType, bytes),
+          body: sealBound(options.method || 'GET', boundTarget(absolute), contentType, bytes),
         })).then(maybeUnwrap)
       }).catch(function (error) {
         // A body-serialization failure must not silently downgrade to plaintext.

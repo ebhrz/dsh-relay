@@ -386,5 +386,35 @@ await scenario('a sealed read needs a proof the relay cannot mint', async () => 
   }
 })
 
+
+await scenario('a sealed target carrying the relay prefix is accepted', async () => {
+  const h = await harness((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json', 'content-length': '2' })
+    res.end('{}')
+  })
+  try {
+    // What a page at /c/<id>/ actually seals for a relative call: prefix included.
+    const prefixed = sealBound(h.box, 'GET', '/c/HTTP0001/api/settings/describe', '', Buffer.alloc(8))
+    h.pump.handleStreamData(41, request('GET', h.url('/api/settings/describe'), [
+      'x-relay-enc: 1',
+      `x-relay-bind: ${prefixed.toString('base64')}`,
+    ]))
+    await waitFor(() => h.hits.length === 1, 'the prefixed target is accepted')
+    assert.equal(h.hits[0].url, '/api/settings/describe', 'the forwarded path is the stripped one')
+
+    // A different path is still a mismatch, prefix or not.
+    h.reset()
+    const other = sealBound(h.box, 'GET', '/c/HTTP0001/api/other', '', Buffer.alloc(8))
+    h.pump.handleStreamData(42, request('GET', h.url('/api/settings/describe'), [
+      'x-relay-enc: 1',
+      `x-relay-bind: ${other.toString('base64')}`,
+    ]))
+    await waitFor(() => h.closed.includes(42), 'a real mismatch is still refused')
+    assert.equal(h.hits.length, 1, 'nothing reached the host')
+  } finally {
+    h.stop()
+  }
+})
+
 console.log(failures === 0 ? 'all pump http checks passed' : `${failures} pump http check(s) failed`)
 process.exit(failures === 0 ? 0 : 1)
