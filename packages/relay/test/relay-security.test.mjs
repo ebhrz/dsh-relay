@@ -14,7 +14,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { WebSocket } from 'ws'
-import { TenantStore, keyIdFor, secretFor } from '../src/tenants.js'
+import { TenantStore, keyIdFor, secretFor, legacySecretFor } from '../src/tenants.js'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const relayPath = path.join(here, '..', 'src', 'index.mjs')
@@ -80,7 +80,7 @@ async function startRelay(extraArgs = []) {
 }
 
 /** Register an agent; `key` is a tenant key or null for the admin key. */
-async function registerAgent(relay, id, { key, adminKey = null, gate = GATE_A } = {}) {
+async function registerAgent(relay, id, { key, adminKey = null, gate = GATE_A, proofSecret = null } = {}) {
   const ws = new WebSocket(`wss://127.0.0.1:${relay.agentPort}/agent`, { rejectUnauthorized: false })
   const control = []
   const frames = []
@@ -90,7 +90,7 @@ async function registerAgent(relay, id, { key, adminKey = null, gate = GATE_A } 
     ws.once('error', reject)
   })
 
-  const secret = key ? secretFor(key) : String(adminKey)
+  const secret = proofSecret ?? (key ? secretFor(key) : String(adminKey))
   const hello = { t: 'hello', v: 1, id, gate }
   if (key) hello.keyId = keyIdFor(key)
   ws.send(JSON.stringify(hello))
@@ -523,6 +523,29 @@ await scenario('a request body that looks like another request is not cut', asyn
     await waitFor(() => agentA.frames.map((f) => f.toString('latin1')).join('').includes('world'), 'the body arrived')
     assert.equal(socket.destroyed, false, 'the connection was not cut by a request line inside a body')
     socket.destroy()
+  } finally {
+    relay.stop()
+  }
+})
+
+await scenario('an agent that only knows the v1 proof secret is still accepted', async () => {
+  // Rollout order: tenants created before the v2 derivation have no raw key left,
+  // and agents keep arriving that ignore `v`. Both must keep working, or the
+  // upgrade becomes a flag day.
+  const relay = await startRelay()
+  try {
+    const created = relay.tenant('legacy-proof')
+    const oldAgent = await registerAgent(relay, 'LEGACY01', {
+      key: created.key,
+      gate: GATE_A,
+      proofSecret: legacySecretFor(created.key),
+    })
+    assert.ok(oldAgent.registered, 'the v1 proof is accepted for a v2 tenant')
+    assert.match(relay.log(), /proved itself with the v1 secret/, 'and the relay asks for an upgrade once')
+
+    // The same tenant also accepts the v2 proof, so an updated agent works too.
+    const newAgent = await registerAgent(relay, 'LEGACY02', { key: created.key, gate: GATE_A })
+    assert.ok(newAgent.registered, 'the v2 proof is accepted as well')
   } finally {
     relay.stop()
   }

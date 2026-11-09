@@ -22,9 +22,21 @@ export function keyIdFor(key) {
   return hashKey(key).slice(0, 12)
 }
 
-/** The HMAC secret both sides derive from the key. Deriving keeps the relay's
- *  disk free of plaintext keys while the agent still proves knowledge of one. */
+/**
+ * The HMAC secret both sides derive from the key, version 2.
+ *
+ * Version 1 used `sha256(key)` for the secret and its first 48 bits as the key
+ * id, so anyone who learned a key id knew part of the secret - and key ids are
+ * printed by `tenant list` and sent in every hello. Version 2 domain-separates
+ * the two: the id stays `sha256(key)[0..12]`, the secret becomes
+ * `sha256('dsh-relay:hmac:v2:' + key)`.
+ */
 export function secretFor(key) {
+  return crypto.createHash('sha256').update(`dsh-relay:hmac:v2:${String(key)}`).digest('hex')
+}
+
+/** The version-1 secret, kept so a client that has not updated still works. */
+export function legacySecretFor(key) {
   return hashKey(key)
 }
 
@@ -184,6 +196,9 @@ export class TenantStore {
       id,
       keyId: keyIdFor(key),
       secret: secretFor(key),
+      // Kept so an agent built before the v2 derivation still proves itself.
+      legacySecret: legacySecretFor(key),
+      proofVersion: 2,
       quotaBytesDay,
       maxStreams,
       usedBytesDay: 0,
@@ -287,18 +302,34 @@ export class TenantStore {
 }
 
 function normalize(tenant, quotaDefault, maxStreamsDefault = DEFAULT_MAX_STREAMS) {
+  // A record written before v2 has `secret = sha256(key)` and no raw key left, so
+  // it cannot be re-derived: it keeps that secret and is advertised as version 1.
+  // A record that still carries the raw key (`tenant.key`) is migrated now, and
+  // keeps the v1 secret alongside so an agent that has not updated still proves
+  // itself correctly.
+  let secret
+  let legacySecret = tenant.legacySecret ?? null
+  let proofVersion = 1
+  if (tenant.key) {
+    secret = secretFor(tenant.key)
+    legacySecret = legacySecretFor(tenant.key)
+    proofVersion = 2
+  } else {
+    secret = tenant.secret ?? null
+    if (tenant.proofVersion === 2) proofVersion = 2
+  }
   // Fail closed. hashKey('') is sha256 of the empty string - a value anyone can
   // compute - so a record carrying neither a key nor a secret (a hand-edited
   // ledger, a half-finished migration) would let anyone register as that tenant.
-  const derived = tenant.secret ?? (tenant.key ? hashKey(tenant.key) : null)
-  if (!derived) {
+  if (!secret) {
     throw new Error(`tenant ${tenant.id ?? '(no id)'} has neither a key nor a secret`)
   }
-  const secret = derived
   return {
     id: tenant.id,
-    keyId: tenant.keyId ?? secret.slice(0, 12),
+    keyId: tenant.keyId ?? keyIdFor(tenant.key ?? ''),
     secret,
+    legacySecret,
+    proofVersion,
     quotaBytesDay: Number.isFinite(tenant.quotaBytesDay) ? tenant.quotaBytesDay : quotaDefault,
     maxStreams: Number.isFinite(tenant.maxStreams) ? tenant.maxStreams : maxStreamsDefault,
     usedBytesDay: Number.isFinite(tenant.usedBytesDay) ? tenant.usedBytesDay : 0,

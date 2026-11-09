@@ -167,13 +167,13 @@ export class RelayClient extends EventTarget {
         let msg
         try { msg = JSON.parse(data.toString()) } catch { return }
         if (msg.t === 'challenge') {
-          // The relay stores only sha256(key) for a tenant key, so a tenant proof
-          // is keyed by that hash; the legacy admin --key is keyed by the key
-          // itself. Older relays do not send `mode` and only ever meant the admin
-          // derivation, so that stays the fallback.
+          // A tenant proof is keyed by a hash of the relay key (the relay never
+          // stores the key itself); the legacy admin --key is keyed by the key.
+          // Version 2 domain-separates the secret from the key id, and an older
+          // relay sends no `v`, so the v1 derivation stays the fallback.
           const key = String(this.relayKey)
           const secret = msg.mode === 'tenant'
-            ? crypto.createHash('sha256').update(key).digest('hex')
+            ? crypto.createHash('sha256').update(msg.v >= 2 ? `dsh-relay:hmac:v2:${key}` : key).digest('hex')
             : key
           const proof = crypto.createHmac('sha256', secret)
             .update(`${msg.nonce}|${this.identity.id}`).digest('hex')

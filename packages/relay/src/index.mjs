@@ -275,6 +275,7 @@ const blockedDevices = new Map() // device id -> { reason, day }
  * Open sockets per agent address. Unauthenticated peers must not be able to fill
  * the listener, and one address with dozens of live agents is not a real user.
  */
+const legacyProofWarned = new Set() // tenants seen using the v1 proof secret
 const agentSocketsByIp = new Map() // ip -> open socket count
 const MAX_AGENT_SOCKETS_PER_IP = Number(process.env.DSH_RELAY_AGENT_SOCKETS_PER_IP ?? 32)
 // A frame cap for peers that have not registered yet, and the real one after.
@@ -852,6 +853,7 @@ function startAgentListener(args, tls) {
     let helloGate = null // gate arrives in hello; used when register completes
     let helloKeyId = null // tenant key id from hello (absent for the admin key)
     let pendingChallenge = null
+    let pendingProofVersion = 1
     let registered = false
     let pongMisses = 0
     ws._socket.setNoDelay(true)
@@ -922,7 +924,15 @@ function startAgentListener(args, tls) {
           // already did.
           const challengeTenant = helloKeyId ? (tenantStore?.byKeyId(helloKeyId) ?? null) : null
           const mode = challengeTenant || !args.key ? 'tenant' : 'admin'
-          ws.send(JSON.stringify({ t: 'challenge', nonce: pendingChallenge, mode }))
+          // `v` selects the secret derivation. Version 2 domain-separates the HMAC
+          // key from the key id, so the 48 bits a key id exposes no longer reveal
+          // part of the secret. A tenant whose ledger predates v2 has no raw key
+          // left to re-derive from, so it is advertised as v1 and stays valid -
+          // clients follow whatever this says, which is what makes the rollout
+          // need no flag day.
+          const proofVersion = mode === 'tenant' ? (challengeTenant?.proofVersion ?? 1) : 1
+          pendingProofVersion = proofVersion
+          ws.send(JSON.stringify({ t: 'challenge', nonce: pendingChallenge, mode, v: proofVersion }))
           return
         }
 
@@ -937,7 +947,12 @@ function startAgentListener(args, tls) {
               pendingChallenge = null
               return failConn(blocked)
             }
-            secret = tenant.secret
+            // The client follows the version the challenge advertised; accept the
+            // matching secret so a tenant migrated to v2 can still be reached by a
+            // client that only knows v1.
+            secret = pendingProofVersion >= 2
+              ? tenant.secret
+              : (tenant.legacySecret ?? tenant.secret)
           } else if (args.key) {
             secret = args.key
           } else {
@@ -946,7 +961,21 @@ function startAgentListener(args, tls) {
           }
           const expected = crypto.createHmac('sha256', secret)
             .update(`${pendingChallenge}|${id}`).digest('hex')
-          const proofOk = timingSafeEqual(String(msg.proof ?? ''), expected)
+          let proofOk = timingSafeEqual(String(msg.proof ?? ''), expected)
+          if (!proofOk && tenant && tenant.legacySecret && tenant.legacySecret !== secret) {
+            // An agent that predates the v2 derivation ignores `v` and keys its
+            // proof with the v1 secret. Accept it, and say so once per tenant so
+            // the log asks for an upgrade instead of repeating every reconnect.
+            const legacyExpected = crypto.createHmac('sha256', tenant.legacySecret)
+              .update(`${pendingChallenge}|${id}`).digest('hex')
+            if (timingSafeEqual(String(msg.proof ?? ''), legacyExpected)) {
+              proofOk = true
+              if (!legacyProofWarned.has(tenant.id)) {
+                legacyProofWarned.add(tenant.id)
+                log(`tenant ${tenant.id}: agent proved itself with the v1 secret (upgrade dsh-relay-phone)`)
+              }
+            }
+          }
           pendingChallenge = null
           if (!proofOk) return failConn('bad key proof')
 
@@ -1179,9 +1208,11 @@ function runTenantCli(argv) {
       const tenant = store.resolve(flags.name ?? positional[0])
       if (!tenant) fail(`no tenant ${flags.name ?? positional[0]}`)
       const used = tenant.day === quotaDayNow() ? tenant.usedBytesDay : 0
-      // `secret` is the value this relay verifies registration proofs against, so
-      // it is a credential, not a fingerprint: never print it.
-      const { secret, ...safe } = tenant
+      // `secret` (and its v1 twin) is what this relay verifies registration
+      // proofs against, so it is a credential, not a fingerprint: never print it.
+      const { secret, legacySecret, ...safe } = tenant
+      void secret
+      void legacySecret
       console.log(JSON.stringify({ ...safe, usedToday: used, today: quotaDayNow() }, null, 2))
       return
     }
@@ -1258,6 +1289,13 @@ tenantStore.onRotate = (tenant) => {
   tenantAgent.delete(tenant.id)
 }
 const tls = ensureSelfSignedCert(args)
+// The admin key is a bearer credential that never expires and is exempt from
+// every tenant limit, so a short one is the weakest point of an otherwise
+// hardened relay. Warn instead of refusing: a running deployment must not stop
+// because of a policy change.
+if (args.key && String(args.key).length < 32) {
+  log(`warning: --key is ${String(args.key).length} characters; use at least 32 (openssl rand -hex 24)`)
+}
 const phoneServer = startPhoneListener(args)
 const agentServer = startAgentListener(args, tls)
 const tenantCount = tenantStore.list().length

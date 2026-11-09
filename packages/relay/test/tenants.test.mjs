@@ -4,6 +4,7 @@
 // Pure filesystem + crypto; no relay process and no network.
 
 import assert from 'node:assert/strict'
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -13,6 +14,7 @@ import {
   TenantStore,
   formatBytes,
   keyIdFor,
+  legacySecretFor,
   parseQuota,
   quotaDay,
   secretFor,
@@ -35,7 +37,12 @@ try {
   // ── key derivation: what the agent sends and what the relay stores ───
   const key = 'a'.repeat(48)
   assert.equal(keyIdFor(key).length, 12)
-  assert.equal(keyIdFor(key), secretFor(key).slice(0, 12))
+  // Version 2 exists so the id reveals nothing about the secret: the id is
+  // sha256(key)[0..12] and the secret is derived from a different prefix.
+  assert.notEqual(keyIdFor(key), secretFor(key).slice(0, 12))
+  assert.equal(legacySecretFor(key), crypto.createHash('sha256').update(key).digest('hex'))
+  assert.equal(legacySecretFor(key).slice(0, 12), keyIdFor(key), 'v1 leaked the first 48 bits; v2 must not')
+  assert.notEqual(secretFor(key), legacySecretFor(key))
   assert.notEqual(keyIdFor(key), keyIdFor(`${key}b`))
 
   // ── create / resolve ────────────────────────────────────────────────

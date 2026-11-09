@@ -1,6 +1,6 @@
 {
   "name": "dsh-relay-server",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "Zero-knowledge relay for dsh-relay-phone: no accounts, no database, routes end-to-end encrypted streams by device id.",
   "type": "module",
   "bin": {
@@ -13,7 +13,7 @@
   "scripts": {
     "start": "node src/index.mjs",
     "start:tls": "node src/tls-terminator.mjs",
-    "check": "node --check src/index.mjs && node --check src/tls-terminator.mjs",
+    "check": "node --check src/index.mjs && node --check src/tls-terminator.mjs && node --check src/http-split.js && node --check src/tenants.js",
     "test": "node test/tenants.test.mjs && node test/http-split.test.mjs && node test/relay-live.test.mjs && node test/relay-security.test.mjs && node test/plugin-relay.test.mjs && node test/tls-terminator.test.mjs"
   },
   "keywords": [
