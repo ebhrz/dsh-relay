@@ -22,6 +22,7 @@ import path from 'node:path'
 import os from 'node:os'
 import { execFileSync } from 'node:child_process'
 import { WebSocketServer } from 'ws'
+import { RequestScanner, identityOfHead } from './http-split.js'
 import {
   DEFAULT_MAX_STREAMS,
   DEFAULT_QUOTA_BYTES,
@@ -436,11 +437,28 @@ class PhoneConn {
     this.sid = sid
     this.closed = false
     socket.setNoDelay(true)
+    // The stream is bound to this tenant. Every later request on the same socket
+    // must name the same tenant, or the connection is cut before a byte of it is
+    // forwarded: a pooling proxy or a hostile agent must never hand one tenant's
+    // request to another tenant's agent.
+    this.scanner = new RequestScanner()
     socket.on('data', (chunk) => {
       if (this.closed || entry.ws.readyState !== 1) return
-      charge(entry, chunk.length)
-      if (this.closed) return
-      sendStream(entry, sid, chunk)
+      const { forward, refused } = this.scanner.feed(chunk, (head) => this.foreignRequest(head))
+      if (forward.length > 0) {
+        charge(entry, forward.length)
+        if (this.closed) return
+        sendStream(entry, sid, forward)
+      }
+      if (refused) {
+        log(`stream closed: ${refused}`)
+        // Forward is already the safe prefix; end the connection instead of
+        // serving the request to the wrong tenant.
+        try {
+          this.socket.once('error', () => { try { this.socket.destroy() } catch {} })
+          this.socket.end()
+        } catch {}
+      }
     })
     const finish = () => this.destroy(true)
     socket.on('close', finish)
@@ -452,7 +470,41 @@ class PhoneConn {
     charge(entry, head.length + remainder.length)
     if (this.closed) return
     sendStream(entry, sid, head)
-    if (remainder.length > 0) sendStream(entry, sid, remainder)
+    // Prime the framing with the request the relay already routed, then feed what
+    // arrived behind it (a body, or a pipelined request that must be checked).
+    const headWithoutTail = head.subarray(0, Math.max(0, head.length - 4))
+    this.scanner.startWith(headWithoutTail)
+    if (remainder.length > 0) {
+      const { forward, refused } = this.scanner.feed(remainder, (candidate) => this.foreignRequest(candidate))
+      if (forward.length > 0) sendStream(entry, sid, forward)
+      if (refused) {
+        log(`stream closed: ${refused}`)
+        try {
+          this.socket.once('error', () => { try { this.socket.destroy() } catch {} })
+          this.socket.end()
+        } catch {}
+      }
+    }
+  }
+
+  /**
+   * Why a request on this bound stream may not be forwarded, or null.
+   *
+   * The comparison is against the tenant this stream was routed to, so a second
+   * request that names anything else (or names nothing at all) is refused.
+   */
+  foreignRequest(head) {
+    const identity = identityOfHead(head)
+    if (!identity.id) return `request without a tenant on a bound stream (${identity.path.slice(0, 40)})`
+    if (identity.id !== this.entry.id) {
+      return `request for ${identity.id} on a stream bound to ${this.entry.id}`
+    }
+    if (identity.gate && this.entry.gate && !timingSafeEqual(identity.gate, this.entry.gate)) {
+      return `gate mismatch for ${identity.id}`
+    }
+    // Same tenant: allowed, so a client that ignores `Connection: close` still
+    // gets its keep-alive within its own deployment.
+    return null
   }
 
   sendToClient(chunk) {

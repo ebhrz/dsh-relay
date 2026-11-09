@@ -445,5 +445,88 @@ await scenario('a request without a gate learns nothing about the device', async
   }
 })
 
+await scenario('a second request for another tenant never reaches the bound agent', async () => {
+  // This is the pooled-connection attack in its most direct form: two requests,
+  // one socket, two tenants. The relay must cut the connection before the second
+  // request - and before a byte of it reaches the first tenant's agent.
+  const relay = await startRelay()
+  try {
+    const a = relay.tenant('tenant-a')
+    const b = relay.tenant('tenant-b')
+    const agentA = await registerAgent(relay, 'TENANTA1', { key: a.key, gate: GATE_A })
+    const agentB = await registerAgent(relay, 'TENANTB1', { key: b.key, gate: GATE_B })
+    assert.ok(agentA.registered && agentB.registered, 'both tenants are connected')
+
+    const socket = net.connect({ host: '127.0.0.1', port: relay.phonePort })
+    relay.sockets.push(socket)
+    socket.on('error', () => {})
+    await new Promise((resolve) => socket.once('connect', resolve))
+
+    socket.write(`GET /c/TENANTA1/first?g=${GATE_A} HTTP/1.1\r\nhost: x\r\n\r\n`)
+    const firstFrameA = await firstFrame(agentA)
+    // Stream frames carry a 4-byte length prefix in front of the phone bytes.
+    const firstHead = firstFrameA.subarray(4).toString('latin1')
+    assert.ok(
+      firstHead.startsWith('GET /c/TENANTA1/first'),
+      `the first request reached A (head: ${JSON.stringify(firstHead.slice(0, 90))})`,
+    )
+
+    // Same socket, different tenant. A hostile agent would keep this socket open
+    // exactly like this.
+    const framesBefore = agentA.frames.length
+    socket.write(`GET /c/TENANTB1/second?g=${GATE_B} HTTP/1.1\r\nhost: x\r\n\r\n`)
+
+    await waitFor(() => socket.destroyed || socket.readableEnded, 'the relay ends the reused connection')
+    await new Promise((done) => setTimeout(done, 200))
+
+    const leaked = agentA.frames.slice(framesBefore).map((frame) => frame.toString('latin1')).join('')
+    assert.equal(/TENANTB1/.test(leaked), false, "B's request never reached A's agent")
+    assert.equal(agentB.frames.length, 0, "B's agent never received it either")
+  } finally {
+    relay.stop()
+  }
+})
+
+await scenario('a second request for the same tenant is still allowed', async () => {
+  const relay = await startRelay()
+  try {
+    const a = relay.tenant('same-tenant')
+    const agentA = await registerAgent(relay, 'SAMETEN1', { key: a.key, gate: GATE_A })
+    const socket = net.connect({ host: '127.0.0.1', port: relay.phonePort })
+    relay.sockets.push(socket)
+    socket.on('error', () => {})
+    await new Promise((resolve) => socket.once('connect', resolve))
+    socket.write(`GET /c/SAMETEN1/one?g=${GATE_A} HTTP/1.1\r\nhost: x\r\n\r\n`)
+    await firstFrame(agentA)
+    const before = agentA.frames.length
+    socket.write(`GET /c/SAMETEN1/two?g=${GATE_A} HTTP/1.1\r\nhost: x\r\n\r\n`)
+    await waitFor(() => agentA.frames.length > before, 'the same-tenant request is forwarded')
+    const all = agentA.frames.map((frame) => frame.toString('latin1')).join('')
+    assert.match(all, /\/two/, 'the second request arrived')
+    socket.destroy()
+  } finally {
+    relay.stop()
+  }
+})
+
+await scenario('a request body that looks like another request is not cut', async () => {
+  const relay = await startRelay()
+  try {
+    const a = relay.tenant('sneaky-body')
+    const agentA = await registerAgent(relay, 'SNEAKY01', { key: a.key, gate: GATE_A })
+    const socket = net.connect({ host: '127.0.0.1', port: relay.phonePort })
+    relay.sockets.push(socket)
+    socket.on('error', () => {})
+    await new Promise((resolve) => socket.once('connect', resolve))
+    const body = `hello\r\n\r\nGET /c/OTHER999/ HTTP/1.1\r\n\r\nworld`
+    socket.write(`POST /c/SNEAKY01/upload?g=${GATE_A} HTTP/1.1\r\nhost: x\r\ncontent-length: ${Buffer.byteLength(body)}\r\n\r\n${body}`)
+    await waitFor(() => agentA.frames.map((f) => f.toString('latin1')).join('').includes('world'), 'the body arrived')
+    assert.equal(socket.destroyed, false, 'the connection was not cut by a request line inside a body')
+    socket.destroy()
+  } finally {
+    relay.stop()
+  }
+})
+
 console.log(failures === 0 ? 'all relay security checks passed' : `${failures} relay security check(s) failed`)
 process.exit(failures === 0 ? 0 : 1)
