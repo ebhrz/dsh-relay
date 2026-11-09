@@ -270,13 +270,19 @@ const tenantAgent = new Map() // tenant id -> { id, entry }
  * Entries are cleared when the device registers again and ignored after the UTC
  * day rollover.
  */
-const blockedDevices = new Map() // device id -> { reason, day }
+const blockedDevices = new Map() // device id -> { reason, day, gate }
+// Last gate seen for a device. Lets an offline answer go only to a caller that
+// already knows the gate, instead of confirming the device exists to anyone.
+const deviceGates = new Map() // device id -> gate
+const DEVICE_GATES_MAX = 5000
 /**
  * Open sockets per agent address. Unauthenticated peers must not be able to fill
  * the listener, and one address with dozens of live agents is not a real user.
  */
 const legacyProofWarned = new Set() // tenants seen using the v1 proof secret
 const agentSocketsByIp = new Map() // ip -> open socket count
+const IDLE_HTTP_MS = 10 * 60_000
+const IDLE_TUNNEL_MS = 30 * 60_000
 const MAX_AGENT_SOCKETS_PER_IP = Number(process.env.DSH_RELAY_AGENT_SOCKETS_PER_IP ?? 32)
 // A frame cap for peers that have not registered yet, and the real one after.
 const PREAUTH_MAX_PAYLOAD = 256 * 1024
@@ -367,8 +373,10 @@ function closeEntry(entry, reason) {
   if (!entry) return
   entry.alive = false
   // Remember why this device was cut, so its phone can be told the reason
-  // instead of reading a generic "offline" page.
-  if (entry.id) blockedDevices.set(entry.id, { reason, day: quotaDayNow() })
+  // instead of reading a generic "offline" page. The gate is part of the record:
+  // the reason is only disclosed to a request that already proved it belongs to
+  // this device, otherwise it maps state for anyone who knows an id.
+  if (entry.id) blockedDevices.set(entry.id, { reason, day: quotaDayNow(), gate: entry.gate })
   for (const sid of [...entry.streams]) {
     const phone = phoneByStream.get(sid)
     if (phone) phone.destroy(false)
@@ -437,12 +445,29 @@ class PhoneConn {
     this.entry = entry
     this.sid = sid
     this.closed = false
+    // Register before anything can fail. The constructor can refuse a request (an
+    // unframeable head, a foreign pipelined request) and call destroy(), which
+    // deletes this map entry; if the caller registered afterwards, the closed
+    // object would be published and never removed - one leak per refused request.
+    phoneByStream.set(sid, this)
+    this.lastActivity = Date.now()
     socket.setNoDelay(true)
     // The stream is bound to this tenant. Every later request on the same socket
     // must name the same tenant, or the connection is cut before a byte of it is
     // forwarded: a pooling proxy or a hostile agent must never hand one tenant's
     // request to another tenant's agent.
     this.scanner = new RequestScanner()
+    // Post-auth idle ceiling. A tenant controls both ends of its own stream, so
+    // without this it could hold maxStreams sockets open forever by sending a byte
+    // now and then. An upgrade tunnel gets a longer leash because a quiet mux is
+    // normal between turns.
+    this.idleTimer = setInterval(() => {
+      const limit = this.scanner?.mode === 'tunnel' ? IDLE_TUNNEL_MS : IDLE_HTTP_MS
+      if (Date.now() - this.lastActivity < limit) return
+      log(`phone-idle sid=${this.sid} idle=${Math.round((Date.now() - this.lastActivity) / 1000)}s -> closing`)
+      this.destroy(true)
+    }, 60_000)
+    this.idleTimer.unref?.()
     // Response bytes are watched only to learn whether an upgrade really
     // happened: the stream becomes a tunnel when the agent answers 101, never
     // because the request asked for one.
@@ -450,6 +475,7 @@ class PhoneConn {
     this.switchDecided = false
     socket.on('data', (chunk) => {
       if (this.closed || entry.ws.readyState !== 1) return
+      this.lastActivity = Date.now()
       const { forward, refused } = this.scanner.feed(chunk, (candidate) => this.foreignRequest(candidate))
       if (forward.length > 0) {
         charge(entry, forward.length)
@@ -537,6 +563,7 @@ class PhoneConn {
 
   sendToClient(chunk) {
     if (this.closed) return
+    this.lastActivity = Date.now()
     this.noteAgentBytes(chunk)
     // A phone that opens a stream and then never reads must not make the relay
     // buffer it forever: past this much pending data the stream is dropped and
@@ -553,6 +580,7 @@ class PhoneConn {
   destroy(notifyAgent = true) {
     if (this.closed) return
     this.closed = true
+    if (this.idleTimer) clearInterval(this.idleTimer)
     phoneByStream.delete(this.sid)
     this.entry.streams.delete(this.sid)
     // Graceful close: end() flushes any pending write buffer before FIN —
@@ -632,7 +660,9 @@ function handlePhoneSocket(args, socket) {
       let rawQuery = q === -1 ? '' : target.slice(q + 1)
 
       if (rawPath === '/' || rawPath === '/healthz') {
-        return tinyResponse(socket, 200, 'OK', 'dsh-relay-server running\n')
+        // `streams` is a liveness number an operator can watch - and the only way
+        // to see that a refused request did not leak a stream entry.
+        return tinyResponse(socket, 200, 'OK', `dsh-relay-server running\nstreams=${phoneByStream.size}\n`)
       }
       let m = rawPath.match(/^\/c\/([A-Za-z0-9]{4,16})(\/.*)?$/)
       if (!m && fullHead) {
@@ -687,11 +717,18 @@ function handlePhoneSocket(args, socket) {
           'dsh-relay: the whole relay has used up its daily traffic budget. It resets at 00:00 UTC.\n')
       }
       const candidates = entriesForDevice(id)
+      const blocked = blockedDevices.get(id)
+      // The reason for a cut is only disclosed to a request that proves it knows
+      // this device's gate; everything else gets the same 403 a wrong gate gets,
+      // so a probe cannot map online/offline/quota state from the status code.
+      const blockedMatches = Boolean(blocked)
+        && blocked.day === quotaDayNow()
+        && Boolean(blocked.gate)
+        && timingSafeEqual(gate, blocked.gate)
+      const knownGate = deviceGates.get(id)
+      const gateMatchesDevice = Boolean(knownGate) && timingSafeEqual(gate, knownGate)
       if (!candidates.length) {
-        // A device that was cut on purpose gets the real reason; anything else
-        // is simply not connected right now.
-        const blocked = blockedDevices.get(id)
-        if (blocked && blocked.day === quotaDayNow()) {
+        if (blockedMatches) {
           if (blocked.reason === 'egress-limit') {
             return tinyResponse(socket, 503, 'Service Unavailable',
               'dsh-relay: the whole relay has used up its daily traffic budget. It resets at 00:00 UTC.\n')
@@ -705,8 +742,12 @@ function handlePhoneSocket(args, socket) {
               'dsh-relay: this key is disabled on the relay.\n')
           }
         }
-        return tinyResponse(socket, 503, 'Service Unavailable',
-          'dsh-relay: device is offline (its dsh-relay-phone is not connected). Retry later.\n')
+        if (gateMatchesDevice) {
+          return tinyResponse(socket, 503, 'Service Unavailable',
+            'dsh-relay: device is offline (its dsh-relay-phone is not connected). Retry later.\n')
+        }
+        log(`403 id=${id} candidates=0 gatePresent=true`)
+        return tinyResponse(socket, 403, 'Forbidden', 'dsh-relay: bad gate.\n')
       }
       const entry = candidates.find((candidate) => timingSafeEqual(gate, candidate.gate))
       if (!entry) {
@@ -738,7 +779,10 @@ function handlePhoneSocket(args, socket) {
       // gone, a long-lived streaming response is normal from here on.
       clearPreAuth()
       socket.setTimeout(0)
-      phoneByStream.set(sid, new PhoneConn(socket, entry, sid, firstBytes, remainderBytes))
+      // The constructor registers itself in phoneByStream before anything can
+      // close it; registering here as well would publish a stream that destroy()
+      // already removed.
+      new PhoneConn(socket, entry, sid, firstBytes, remainderBytes)
     }
 
     let remainderBytes = Buffer.alloc(0)
@@ -819,6 +863,27 @@ function startAgentListener(args, tls) {
   server.handshakeTimeout = 10_000
   server.headersTimeout = Math.max(args.preAuthTimeoutMs, 5000)
   server.requestTimeout = args.preAuthTimeoutMs * 2
+  // Count sockets at accept, not at upgrade. A peer that connects and stays silent
+  // holds a maxConnections slot for the whole handshake timeout; without this one
+  // address could fill the listener with bare TCP connections.
+  server.on('connection', (socket) => {
+    const ip = socket.remoteAddress ?? 'unknown'
+    const open = (agentSocketsByIp.get(ip) ?? 0) + 1
+    if (open > MAX_AGENT_SOCKETS_PER_IP) {
+      log(`agent: too many open sockets from ${ip} (${open}) -> refusing`)
+      socket.destroy()
+      return
+    }
+    agentSocketsByIp.set(ip, open)
+    let released = false
+    socket.once('close', () => {
+      if (released) return
+      released = true
+      const left = (agentSocketsByIp.get(ip) ?? 1) - 1
+      if (left <= 0) agentSocketsByIp.delete(ip)
+      else agentSocketsByIp.set(ip, left)
+    })
+  })
   // A single agent frame is a phone chunk or a control message; 8 MB is far
   // above both and keeps an unauthenticated peer from making us buffer whatever
   // it likes (ws defaults to 100 MB).
@@ -853,30 +918,9 @@ function startAgentListener(args, tls) {
       socket.destroy()
       return
     }
-    // A stranger can open sockets without ever registering. Bound how many one
-    // address can hold, so a single host cannot fill the whole listener.
-    const ip = socket.remoteAddress ?? 'unknown'
-    const open = (agentSocketsByIp.get(ip) ?? 0) + 1
-    if (open > MAX_AGENT_SOCKETS_PER_IP) {
-      log(`agent: too many open sockets from ${ip} (${open})`)
-      try { socket.write('HTTP/1.1 429 Too Many Requests\r\n\r\n') } catch {}
-      socket.destroy()
-      return
-    }
-    agentSocketsByIp.set(ip, open)
-    // Release on the socket, not on the websocket: `handleUpgrade` answers a
-    // malformed request itself (400) and never calls back, so a ws-only hook would
-    // leak one slot per bad handshake until the address is locked out for good.
-    // The flag keeps the two paths from double-counting.
-    let released = false
-    const release = () => {
-      if (released) return
-      released = true
-      const left = (agentSocketsByIp.get(ip) ?? 1) - 1
-      if (left <= 0) agentSocketsByIp.delete(ip)
-      else agentSocketsByIp.set(ip, left)
-    }
-    socket.once('close', release)
+    // The per-address cap is enforced at TCP accept (startAgentListener): a bare
+    // socket that never sends a request line has to be counted too, or one address
+    // could still fill maxConnections with idle connections.
     wss.handleUpgrade(req, socket, head, (ws) => {
       wss.emit('connection', ws, req)
     })
@@ -927,6 +971,10 @@ function startAgentListener(args, tls) {
         if (!msg || typeof msg !== 'object' || Array.isArray(msg)) return failConn('bad message')
 
         if (msg.t === 'hello') {
+          // One hello per connection. After registration it would only re-stat the
+          // ledger, mint a fresh challenge and rewrite this connection's id/gate -
+          // work an authenticated peer can repeat as fast as it likes.
+          if (registered) return
           // A key may have been created a moment ago by the CLI; pick it up now
           // rather than making the first connection attempt wait for the timer.
           tenantStore?.reloadIfChanged()
@@ -1056,9 +1104,26 @@ function startAgentListener(args, tls) {
           entry.key = key
           indexEntry(entry)
           blockedDevices.delete(id)
+          if (helloGate) {
+            deviceGates.set(id, helloGate)
+            if (deviceGates.size > DEVICE_GATES_MAX) {
+              // Only a bounded cache: an unknown device simply answers 403 until
+              // it registers again, which is the safe default.
+              const oldest = deviceGates.keys().next().value
+              if (oldest !== undefined) deviceGates.delete(oldest)
+            }
+          }
           if (tenant) {
             tenantAgent.set(tenant.id, { id, entry })
             tenant.lastSeenAt = new Date().toISOString()
+            // The agent just proved itself with the v2 secret, so this tenant no
+            // longer needs the v1 one: dropping it ends the "a key id leaks 48
+            // bits of the secret" exposure for every tenant that updated. A
+            // downgraded plugin would have to be upgraded again.
+            if (pendingProofVersion >= 2 && tenant.legacySecret) {
+              tenant.legacySecret = null
+              log(`tenant ${tenant.id}: v2 proof accepted, the v1 secret is no longer accepted`)
+            }
             tenantStore.dirty = true
           }
           registered = true
@@ -1255,7 +1320,9 @@ function runTenantCli(argv) {
     case 'enable': {
       const tenant = store.setStatus(flags.name ?? positional[0], sub === 'disable' ? 'disabled' : 'active')
       console.log(`tenant ${tenant.id} is now ${tenant.status}`)
-      console.log('takes effect on the next agent reconnect; existing connections keep running until then')
+      // The running relay reloads within ~1 s and drops (or admits) the agent then,
+      // so the effect is immediate rather than at the next reconnect.
+      console.log('the running relay applies this within a second; a disabled agent is disconnected mid-stream')
       return
     }
     case 'reset': {

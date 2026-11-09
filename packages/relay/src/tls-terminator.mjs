@@ -123,7 +123,32 @@ function stamp() {
 function start() {
   const certs = loadCerts()
   certMtime = stamp()
+  // The terminator is a raw TLS pipe, so one address opening sockets is exactly as
+  // cheap for it as for the relay: bound both the total and the per-address count
+  // at accept, or a single host can fill every pre-auth slot behind it.
+  const socketsByIp = new Map()
+  const MAX_SOCKETS_PER_IP = Number(process.env.DSH_RELAY_TERMINATOR_PER_IP ?? 32)
+  const MAX_TOTAL = Number(process.env.DSH_RELAY_TERMINATOR_MAX ?? 512)
+  let open = 0
   server = tls.createServer({ ...certs, handshakeTimeout: 15_000 }, (socket) => {
+    open += 1
+    const ip = socket.remoteAddress ?? 'unknown'
+    const perIp = (socketsByIp.get(ip) ?? 0) + 1
+    socketsByIp.set(ip, perIp)
+    let released = false
+    socket.once('close', () => {
+      if (released) return
+      released = true
+      open -= 1
+      const left = (socketsByIp.get(ip) ?? 1) - 1
+      if (left <= 0) socketsByIp.delete(ip)
+      else socketsByIp.set(ip, left)
+    })
+    if (perIp > MAX_SOCKETS_PER_IP || open > MAX_TOTAL) {
+      log(`too many connections (${ip} -> ${perIp}, total ${open}) -> refusing`)
+      try { socket.destroy() } catch {}
+      return
+    }
     const upstream = net.connect({ host: args.upstreamHost, port: args.upstreamPort })
     upstream.setNoDelay(true)
     socket.setNoDelay(true)

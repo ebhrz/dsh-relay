@@ -697,5 +697,125 @@ await scenario('a first request with broken body framing is refused outright', a
   }
 })
 
+await scenario('a refused request leaves no stream behind', async () => {
+  // destroy() inside the constructor used to delete a map entry that the caller
+  // then re-created, leaking one PhoneConn per refused request.
+  const relay = await startRelay()
+  try {
+    const created = relay.tenant('leaky')
+    const agent = await registerAgent(relay, 'LEAKY001', { key: created.key, gate: GATE_A })
+    assert.ok(agent.registered)
+
+    for (let i = 0; i < 40; i += 1) {
+      const socket = net.connect({ host: '127.0.0.1', port: relay.phonePort })
+      relay.sockets.push(socket)
+      socket.on('error', () => {})
+      socket.resume()
+      await new Promise((resolve) => socket.once('connect', resolve))
+      // Both framings: the scanner refuses before forwarding anything.
+      socket.write(`POST /c/LEAKY001/x?g=${GATE_A} HTTP/1.1\r\nhost: x\r\ntransfer-encoding: chunked\r\ncontent-length: 3\r\n\r\nabc`)
+      await new Promise((done) => setTimeout(done, 20))
+      socket.destroy()
+    }
+    await new Promise((done) => setTimeout(done, 300))
+
+    const health = await new Promise((resolve) => {
+      const probe = net.connect({ host: '127.0.0.1', port: relay.phonePort })
+      relay.sockets.push(probe)
+      const chunks = []
+      probe.on('data', (chunk) => chunks.push(chunk))
+      probe.on('error', () => {})
+      probe.once('connect', () => probe.write('GET /healthz HTTP/1.1\r\nhost: x\r\nconnection: close\r\n\r\n'))
+      probe.once('close', () => resolve(Buffer.concat(chunks).toString('latin1')))
+    })
+    assert.match(health, /streams=0/, `no stream survived the refusals (got: ${health.split('\r\n\r\n')[1]?.trim()})`)
+  } finally {
+    relay.stop()
+  }
+})
+
+await scenario('bare TCP sockets cannot fill the agent listener', async () => {
+  const previous = process.env.DSH_RELAY_AGENT_SOCKETS_PER_IP
+  process.env.DSH_RELAY_AGENT_SOCKETS_PER_IP = '4'
+  const relay = await startRelay()
+  const held = []
+  try {
+    // No TLS, no request line: just accepted sockets, which is all it takes.
+    for (let i = 0; i < 4; i += 1) {
+      const raw = net.connect({ host: '127.0.0.1', port: relay.agentPort })
+      relay.sockets.push(raw)
+      raw.on('error', () => {})
+      await new Promise((resolve) => raw.once('connect', resolve))
+      held.push(raw)
+    }
+    const over = net.connect({ host: '127.0.0.1', port: relay.agentPort })
+    relay.sockets.push(over)
+    const refused = await new Promise((resolve) => {
+      over.once('close', () => resolve(true))
+      over.once('error', () => resolve(true))
+      over.once('connect', () => setTimeout(() => resolve(false), 300))
+    })
+    assert.equal(refused, true, 'the fifth socket from one address is dropped at accept')
+
+    for (const socket of held) socket.destroy()
+    await new Promise((done) => setTimeout(done, 200))
+    const created = relay.tenant('after-fill')
+    const agent = await registerAgent(relay, 'AFTERFIL', { key: created.key, gate: GATE_A })
+    assert.ok(agent.registered, 'a legitimate agent registers once the flood stops')
+  } finally {
+    relay.stop()
+    if (previous === undefined) delete process.env.DSH_RELAY_AGENT_SOCKETS_PER_IP
+    else process.env.DSH_RELAY_AGENT_SOCKETS_PER_IP = previous
+  }
+})
+
+await scenario('device state is only disclosed to the right gate', async () => {
+  const relay = await startRelay()
+  try {
+    const created = relay.tenant('stateful')
+    const agent = await registerAgent(relay, 'STATEFUL', { key: created.key, gate: GATE_A })
+    agent.ws.terminate()
+    await new Promise((done) => setTimeout(done, 300))
+
+    const probe = async (gate) => {
+      const socket = net.connect({ host: '127.0.0.1', port: relay.phonePort })
+      relay.sockets.push(socket)
+      socket.on('error', () => {})
+      socket.resume()
+      const chunks = []
+      socket.on('data', (chunk) => chunks.push(chunk))
+      await new Promise((resolve) => socket.once('connect', resolve))
+      socket.write(`GET /c/STATEFUL/m?g=${gate} HTTP/1.1\r\nhost: x\r\nconnection: close\r\n\r\n`)
+      const text = await waitFor(() => {
+        const body = Buffer.concat(chunks).toString('latin1')
+        return body.includes('\r\n\r\n') ? body : ''
+      }, 'a response')
+      socket.destroy()
+      return text.split(' ')[1]
+    }
+
+    assert.equal(await probe('0'.repeat(64)), '403', 'a wrong but well-formed gate learns nothing')
+    assert.equal(await probe(GATE_A), '503', 'the real gate is told the device is offline')
+  } finally {
+    relay.stop()
+  }
+})
+
+await scenario('a registered agent cannot re-open a challenge with hello', async () => {
+  const relay = await startRelay()
+  try {
+    const created = relay.tenant('hello-once')
+    const agent = await registerAgent(relay, 'HELLO001', { key: created.key, gate: GATE_A })
+    assert.ok(agent.registered)
+    const before = agent.control.filter((message) => message.t === 'challenge').length
+    agent.ws.send(JSON.stringify({ t: 'hello', v: 1, id: 'HELLO001', gate: GATE_A, keyId: keyIdFor(created.key) }))
+    await new Promise((done) => setTimeout(done, 300))
+    const after = agent.control.filter((message) => message.t === 'challenge').length
+    assert.equal(after, before, 'no second challenge is minted')
+  } finally {
+    relay.stop()
+  }
+})
+
 console.log(failures === 0 ? 'all relay security checks passed' : `${failures} relay security check(s) failed`)
 process.exit(failures === 0 ? 0 : 1)

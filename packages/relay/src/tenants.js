@@ -11,6 +11,7 @@ import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 
+const STALE_LOCK_MS = 10_000 // a lock older than this is from a writer that died
 export const DEFAULT_QUOTA_BYTES = 50 * 1024 * 1024
 // A phone page holds a handful of connections at once (assets, API calls, the
 // mux WebSocket) and a browser may open six per origin; 32 leaves room for a
@@ -156,13 +157,20 @@ export class TenantStore {
         // verify after the key was rotated underneath it.
         live.legacySecret = next.legacySecret
         live.proofVersion = next.proofVersion
+        const previousResetSeq = live.resetSeq ?? 0
         if (next.day > live.day) {
           live.day = next.day
           live.usedBytesDay = next.usedBytesDay
         } else if (next.day === live.day) {
-          // Never lose bytes this process already charged.
-          live.usedBytesDay = Math.max(live.usedBytesDay, next.usedBytesDay)
+          if (next.resetSeq > previousResetSeq) {
+            // An explicit reset is newer than anything we charged: take it.
+            live.usedBytesDay = next.usedBytesDay
+          } else {
+            // Never lose bytes this process already charged.
+            live.usedBytesDay = Math.max(live.usedBytesDay, next.usedBytesDay)
+          }
         }
+        live.resetSeq = Math.max(previousResetSeq, next.resetSeq ?? 0)
         if (rotated) this.onRotate?.(live)
       } else {
         this.tenants.set(next.id, next)
@@ -178,25 +186,83 @@ export class TenantStore {
   /**
    * Atomic write; a crash mid-save must not lose the quota ledger.
    *
+   * Several processes write this file - the relay itself, `tenant` CLI runs, and
+   * the demo's key dispenser - so a plain read-modify-write loses their changes:
+   * a key handed out seconds ago would vanish, and a `disable` would be silently
+   * undone. Everything that changes the registry therefore runs through #mutate:
+   * take the lock, read what is on disk, apply the change, write. The temporary
+   * name is unique per process, so two writers can never rename a half-written
+   * file over the ledger.
+   *
    * The file holds each tenant's HMAC key — the value the relay itself verifies a
    * registration proof against, so whoever reads it can impersonate that tenant
    * to this relay. It is written 0600 inside a 0700 directory; a world-readable
    * ledger would be a credential leak, not just a privacy one.
    */
   save() {
+    // Nothing to change: fold in whatever is on disk and write the result (this is
+    // the relay's periodic flush of charged bytes).
+    this.#mutate(() => {})
+  }
+
+  #mutate(change) {
     const dir = path.dirname(this.file)
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
     try { fs.chmodSync(dir, 0o700) } catch {}
-    const payload = {
-      version: 1,
-      tenants: [...this.tenants.values()].sort((a, b) => a.id.localeCompare(b.id)),
+    const release = this.#lock()
+    try {
+      // Read under the lock: another process may have written since our last
+      // load, and the change must be applied on top of that state, not instead.
+      this.reloadIfChanged()
+      const result = change()
+      const payload = {
+        version: 1,
+        tenants: [...this.tenants.values()].sort((a, b) => a.id.localeCompare(b.id)),
+      }
+      const tmp = `${this.file}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`
+      fs.writeFileSync(tmp, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 })
+      fs.renameSync(tmp, this.file)
+      try { fs.chmodSync(this.file, 0o600) } catch {}
+      this.dirty = false
+      this.mtimeMs = this.statMtime()
+      return result
+    } finally {
+      release()
     }
-    const tmp = `${this.file}.tmp`
-    fs.writeFileSync(tmp, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 })
-    fs.renameSync(tmp, this.file)
-    try { fs.chmodSync(this.file, 0o600) } catch {}
-    this.dirty = false
-    this.mtimeMs = this.statMtime()
+  }
+
+  /**
+   * Take the ledger lock, or throw. A stale lock (a writer that died) is broken
+   * after STALE_LOCK_MS so one crash cannot freeze every future write.
+   */
+  #lock() {
+    const lockPath = `${this.file}.lock`
+    for (let attempt = 0; attempt < 400; attempt += 1) {
+      try {
+        const fd = fs.openSync(lockPath, 'wx', 0o600)
+        fs.writeSync(fd, String(process.pid))
+        fs.closeSync(fd)
+        let released = false
+        return () => {
+          if (released) return
+          released = true
+          try { fs.unlinkSync(lockPath) } catch {}
+        }
+      } catch (error) {
+        if (error.code !== 'EEXIST') throw error
+        try {
+          const age = Date.now() - fs.statSync(lockPath).mtimeMs
+          if (age > STALE_LOCK_MS) {
+            fs.unlinkSync(lockPath)
+            continue
+          }
+        } catch {}
+        // Waiting a few milliseconds is enough: the critical section is one
+        // small file write.
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5)
+      }
+    }
+    throw new Error('tenant store: the ledger lock is held by another process')
   }
 
   saveIfDirty() {
@@ -214,39 +280,43 @@ export class TenantStore {
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]{1,31}$/.test(id)) {
       throw new Error('name must be 2-32 chars: letters, digits, dot, dash, underscore')
     }
-    if (this.tenants.has(id)) throw new Error(`tenant ${id} already exists`)
-    const key = newKey()
-    const tenant = {
-      id,
-      keyId: keyIdFor(key),
-      secret: secretFor(key),
-      // Kept so an agent built before the v2 derivation still proves itself.
-      legacySecret: legacySecretFor(key),
-      proofVersion: 2,
-      quotaBytesDay,
-      maxStreams,
-      usedBytesDay: 0,
-      day: quotaDay(),
-      status: 'active',
-      note,
-      createdAt: new Date().toISOString(),
-      lastSeenAt: null,
-    }
-    this.tenants.set(id, tenant)
-    this.dirty = true
-    this.save()
-    return { tenant, key }
+    return this.#mutate(() => {
+      // Checked under the lock: another process may have created it meanwhile.
+      if (this.tenants.has(id)) throw new Error(`tenant ${id} already exists`)
+      const key = newKey()
+      const tenant = {
+        id,
+        keyId: keyIdFor(key),
+        secret: secretFor(key),
+        // Kept so an agent built before the v2 derivation still proves itself.
+        legacySecret: legacySecretFor(key),
+        proofVersion: 2,
+        resetSeq: 0,
+        quotaBytesDay,
+        maxStreams,
+        usedBytesDay: 0,
+        day: quotaDay(),
+        status: 'active',
+        note,
+        createdAt: new Date().toISOString(),
+        lastSeenAt: null,
+      }
+      this.tenants.set(id, tenant)
+      this.dirty = true
+      return { tenant, key }
+    })
   }
 
   /** Changes the limits of an existing tenant without touching its key. */
   setLimits(ref, { quotaBytesDay, maxStreams }) {
-    const tenant = this.resolve(ref)
-    if (!tenant) throw new Error(`no tenant ${ref}`)
-    if (Number.isFinite(quotaBytesDay)) tenant.quotaBytesDay = quotaBytesDay
-    if (Number.isFinite(maxStreams)) tenant.maxStreams = maxStreams
-    this.dirty = true
-    this.save()
-    return tenant
+    return this.#mutate(() => {
+      const tenant = this.resolve(ref)
+      if (!tenant) throw new Error(`no tenant ${ref}`)
+      if (Number.isFinite(quotaBytesDay)) tenant.quotaBytesDay = quotaBytesDay
+      if (Number.isFinite(maxStreams)) tenant.maxStreams = maxStreams
+      this.dirty = true
+      return tenant
+    })
   }
 
   byKeyId(keyId) {
@@ -270,31 +340,39 @@ export class TenantStore {
   }
 
   setStatus(ref, status) {
-    const tenant = this.resolve(ref)
-    if (!tenant) throw new Error(`no tenant ${ref}`)
-    tenant.status = status
-    this.dirty = true
-    this.save()
-    return tenant
+    return this.#mutate(() => {
+      const tenant = this.resolve(ref)
+      if (!tenant) throw new Error(`no tenant ${ref}`)
+      tenant.status = status
+      this.dirty = true
+      return tenant
+    })
   }
 
   reset(ref) {
-    const tenant = this.resolve(ref)
-    if (!tenant) throw new Error(`no tenant ${ref}`)
-    tenant.usedBytesDay = 0
-    tenant.day = quotaDay()
-    this.dirty = true
-    this.save()
-    return tenant
+    return this.#mutate(() => {
+      const tenant = this.resolve(ref)
+      if (!tenant) throw new Error(`no tenant ${ref}`)
+      tenant.usedBytesDay = 0
+      tenant.day = quotaDay()
+      // A running relay merges a same-day reload by taking the larger usage count
+      // ("never lose charged bytes"), so a reset that only writes 0 would be
+      // ignored by the next merge. The sequence number tells the relay that this
+      // record is newer than what it holds.
+      tenant.resetSeq = (tenant.resetSeq ?? 0) + 1
+      this.dirty = true
+      return tenant
+    })
   }
 
   remove(ref) {
-    const tenant = this.resolve(ref)
-    if (!tenant) throw new Error(`no tenant ${ref}`)
-    this.tenants.delete(tenant.id)
-    this.dirty = true
-    this.save()
-    return tenant
+    return this.#mutate(() => {
+      const tenant = this.resolve(ref)
+      if (!tenant) throw new Error(`no tenant ${ref}`)
+      this.tenants.delete(tenant.id)
+      this.dirty = true
+      return tenant
+    })
   }
 
   /**
@@ -348,12 +426,20 @@ function normalize(tenant, quotaDefault, maxStreamsDefault = DEFAULT_MAX_STREAMS
   if (!secret) {
     throw new Error(`tenant ${tenant.id ?? '(no id)'} has neither a key nor a secret`)
   }
+  // Fail closed on identity too: a record with no id, and one with neither a key
+  // id nor a raw key to derive it from, would otherwise collapse onto
+  // keyIdFor('') = e3b0c44298fc and let several broken records answer the same
+  // hello.
+  if (!tenant.id) throw new Error('tenant record has no id')
+  const keyId = tenant.keyId ?? (tenant.key ? keyIdFor(tenant.key) : null)
+  if (!keyId) throw new Error(`tenant ${tenant.id} has no key id`)
   return {
     id: tenant.id,
-    keyId: tenant.keyId ?? keyIdFor(tenant.key ?? ''),
+    keyId,
     secret,
     legacySecret,
     proofVersion,
+    resetSeq: Number.isFinite(tenant.resetSeq) ? tenant.resetSeq : 0,
     quotaBytesDay: Number.isFinite(tenant.quotaBytesDay) ? tenant.quotaBytesDay : quotaDefault,
     maxStreams: Number.isFinite(tenant.maxStreams) ? tenant.maxStreams : maxStreamsDefault,
     usedBytesDay: Number.isFinite(tenant.usedBytesDay) ? tenant.usedBytesDay : 0,

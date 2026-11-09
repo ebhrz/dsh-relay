@@ -144,6 +144,57 @@ try {
   fs.rmSync(file)
   assert.equal(live.reloadIfChanged(), false, 'a missing file is not an error')
 
+  // ── a second writer must not lose the first one's changes ────────────
+  // The relay, the CLI and the demo's dispenser all write this file. A save that
+  // overwrites a newer file loses keys that were just handed out, and can undo a
+  // `disable`.
+  {
+    const path2 = path.join(dir, 'shared.json')
+    const processA = new TenantStore(path2)
+    processA.add({ name: 'alice' })
+    const processB = new TenantStore(path2) // loaded before the next write
+    const guest = processA.add({ name: 'guest-abc' })
+    processB.setStatus('alice', 'disabled')
+    const merged = new TenantStore(path2)
+    assert.ok(merged.get('guest-abc'), "B's save did not erase the key A just created")
+    assert.equal(merged.get('guest-abc').keyId, guest.tenant.keyId)
+    assert.equal(merged.get('alice').status, 'disabled', "A's later save did not undo B's disable")
+  }
+
+  // ── an explicit reset is not merged away ─────────────────────────────
+  {
+    const path3 = path.join(dir, 'reset.json')
+    const relay = new TenantStore(path3)
+    const created = relay.add({ name: 'carol', quotaBytesDay: 1000 })
+    relay.charge(created.tenant, 900)
+    const cli = new TenantStore(path3)
+    cli.reset('carol')
+    relay.reloadIfChanged()
+    assert.equal(relay.get('carol').usedBytesDay, 0, 'the reset reached the running relay')
+    assert.equal(relay.get('carol').resetSeq, 1, 'and its sequence advanced')
+    // A second reset keeps working even after the relay charged more.
+    relay.charge(relay.get('carol'), 500)
+    const cli2 = new TenantStore(path3)
+    cli2.reset('carol')
+    relay.reloadIfChanged()
+    assert.equal(relay.get('carol').usedBytesDay, 0, 'resets stay effective')
+  }
+
+  // ── a record without identity is refused, not defaulted ──────────────
+  {
+    const path4 = path.join(dir, 'broken.json')
+    fs.writeFileSync(path4, JSON.stringify({
+      version: 1,
+      tenants: [
+        { id: 'ok1', keyId: 'abcdabcdabcd', secret: 'f'.repeat(64) },
+        { secret: 'e'.repeat(64) },
+      ],
+    }))
+    const store = new TenantStore(path4)
+    assert.ok(store.get('ok1'), 'the good record loads')
+    assert.equal(store.list().length, 1, 'the record without an id is skipped')
+  }
+
   console.log('ok: tenant registry')
 } finally {
   cleanup()
