@@ -111,6 +111,9 @@ export class TenantStore {
       const next = normalize(record, this.quotaDefault, this.maxStreamsDefault)
       const live = this.tenants.get(next.id)
       if (live) {
+        // A rotated key changes keyId. Connections opened with the old key must
+        // not keep running after the rotation - that is the point of rotating.
+        const rotated = live.keyId !== next.keyId
         live.quotaBytesDay = next.quotaBytesDay
         live.maxStreams = next.maxStreams
         live.status = next.status
@@ -124,6 +127,7 @@ export class TenantStore {
           // Never lose bytes this process already charged.
           live.usedBytesDay = Math.max(live.usedBytesDay, next.usedBytesDay)
         }
+        if (rotated) this.onRotate?.(live)
       } else {
         this.tenants.set(next.id, next)
       }
@@ -283,7 +287,14 @@ export class TenantStore {
 }
 
 function normalize(tenant, quotaDefault, maxStreamsDefault = DEFAULT_MAX_STREAMS) {
-  const secret = tenant.secret ?? hashKey(tenant.key ?? '')
+  // Fail closed. hashKey('') is sha256 of the empty string - a value anyone can
+  // compute - so a record carrying neither a key nor a secret (a hand-edited
+  // ledger, a half-finished migration) would let anyone register as that tenant.
+  const derived = tenant.secret ?? (tenant.key ? hashKey(tenant.key) : null)
+  if (!derived) {
+    throw new Error(`tenant ${tenant.id ?? '(no id)'} has neither a key nor a secret`)
+  }
+  const secret = derived
   return {
     id: tenant.id,
     keyId: tenant.keyId ?? secret.slice(0, 12),

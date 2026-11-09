@@ -401,5 +401,49 @@ await scenario('a malformed upgrade and a null message leave the relay running',
   }
 })
 
+await scenario('a relayed request is rewritten to close its connection', async () => {
+  const relay = await startRelay()
+  try {
+    const created = relay.tenant('single-shot')
+    const agent = await registerAgent(relay, 'ONESHOT1', { key: created.key, gate: GATE_A })
+    const socket = net.connect({ host: '127.0.0.1', port: relay.phonePort })
+    relay.sockets.push(socket)
+    socket.on('error', () => {})
+    await new Promise((resolve) => socket.once('connect', resolve))
+    // What a pooling proxy sends: keep-alive on the wire to the relay.
+    socket.write(`GET /c/ONESHOT1/probe?g=${GATE_A} HTTP/1.1\r\nhost: x\r\nconnection: keep-alive\r\nkeep-alive: timeout=5\r\n\r\n`)
+    const frame = await firstFrame(agent)
+    const head = frame.toString('latin1')
+    assert.match(head, /(?:\r\n|^)Connection: close\r\n/i, 'the agent is asked to close')
+    assert.doesNotMatch(head, /keep-alive/i, 'the keep-alive hints are gone')
+    socket.destroy()
+  } finally {
+    relay.stop()
+  }
+})
+
+await scenario('a request without a gate learns nothing about the device', async () => {
+  const relay = await startRelay()
+  try {
+    // No agent for this id and no gate on the request: the answer must be the
+    // same 403 a wrong gate gets, not "offline" (which would map live ids).
+    const socket = net.connect({ host: '127.0.0.1', port: relay.phonePort })
+    relay.sockets.push(socket)
+    socket.on('error', () => {})
+    const chunks = []
+    socket.on('data', (chunk) => chunks.push(chunk))
+    await new Promise((resolve) => socket.once('connect', resolve))
+    socket.write('GET /c/OFFLINE1/probe HTTP/1.1\r\nhost: x\r\nconnection: close\r\n\r\n')
+    const text = await waitFor(() => {
+      const body = Buffer.concat(chunks).toString('latin1')
+      return body.includes('\r\n\r\n') ? body : ''
+    }, 'a response for the gateless request')
+    assert.match(text, /^HTTP\/1\.1 403/, 'refused before any device state is disclosed')
+    socket.destroy()
+  } finally {
+    relay.stop()
+  }
+})
+
 console.log(failures === 0 ? 'all relay security checks passed' : `${failures} relay security check(s) failed`)
 process.exit(failures === 0 ? 0 : 1)

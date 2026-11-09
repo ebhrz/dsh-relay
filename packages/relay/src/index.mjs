@@ -180,7 +180,10 @@ function timingSafeEqual(a, b) {
  * `?g=`, the pairing cookie, and a Referer can carry either.
  */
 function redactGate(text) {
+  // Log lines must stay single-line printable text: a bare CR/LF inside a
+  // request line would otherwise forge an extra log entry.
   return String(text)
+    .replace(/[^\x20-\x7e]/g, '?')
     .replace(/([?&]g=)[0-9a-fA-F]{16,}/g, '$1<redacted>')
     .replace(/(__relay_[gt]=)[0-9a-fA-F]{16,}/g, '$1<redacted>')
     .replace(/(referer:\s*)(\S+)/gi, '$1<redacted>')
@@ -267,6 +270,12 @@ const tenantAgent = new Map() // tenant id -> { id, entry }
  * day rollover.
  */
 const blockedDevices = new Map() // device id -> { reason, day }
+/**
+ * Open sockets per agent address. Unauthenticated peers must not be able to fill
+ * the listener, and one address with dozens of live agents is not a real user.
+ */
+const agentSocketsByIp = new Map() // ip -> open socket count
+const MAX_AGENT_SOCKETS_PER_IP = Number(process.env.DSH_RELAY_AGENT_SOCKETS_PER_IP ?? 32)
 let tenantStore = null // set in main()
 let nextSid = 1
 
@@ -580,6 +589,15 @@ function handlePhoneSocket(args, socket) {
           `dsh-relay: unknown path ${rawPath}. Phones open /c/<id>/?g=<gate> links from the dsh-relay-phone settings panel.\n`)
       }
       const id = m[1]
+      // The gate is checked before anything is said about the device: without it
+      // a request could map which ids are online (403 vs 503) and whether a key
+      // is disabled or out of quota, for any tenant.
+      const params = new URLSearchParams(rawQuery)
+      const gate = params.get('g') ?? gateCookie
+      if (!/^[a-f0-9]{16,128}$/.test(gate ?? '')) {
+        log(`403 id=${id} candidates=? gatePresent=false`)
+        return tinyResponse(socket, 403, 'Forbidden', 'dsh-relay: bad gate.\n')
+      }
       if (egressBlocked()) {
         return tinyResponse(socket, 503, 'Service Unavailable',
           'dsh-relay: the whole relay has used up its daily traffic budget. It resets at 00:00 UTC.\n')
@@ -606,15 +624,9 @@ function handlePhoneSocket(args, socket) {
         return tinyResponse(socket, 503, 'Service Unavailable',
           'dsh-relay: device is offline (its dsh-relay-phone is not connected). Retry later.\n')
       }
-      const params = new URLSearchParams(rawQuery)
-      const gate = params.get('g') ?? gateCookie
-      // The gate names the deployment; with tenant-scoped registrations the same
-      // device id can exist in several tenants, and the gate picks the right one.
-      const entry = /^[a-f0-9]{16,128}$/.test(gate ?? '')
-        ? candidates.find((candidate) => timingSafeEqual(gate, candidate.gate))
-        : null
+      const entry = candidates.find((candidate) => timingSafeEqual(gate, candidate.gate))
       if (!entry) {
-        log(`403 id=${id} candidates=${candidates.length} gatePresent=${Boolean(gate)}`)
+        log(`403 id=${id} candidates=${candidates.length} gatePresent=true`)
         return tinyResponse(socket, 403, 'Forbidden', 'dsh-relay: bad gate.\n')
       }
       // Concurrency cap: one stream is one phone socket held open on this box.
@@ -648,43 +660,54 @@ function handlePhoneSocket(args, socket) {
     let remainderBytes = Buffer.alloc(0)
     socket.on('data', function first(chunk) {
       buffer = Buffer.concat([buffer, chunk])
-      const idx = buffer.indexOf('\r\n')
-      if (idx === -1) {
-        if (buffer.length > 16384) tinyResponse(socket, 431, 'Too Large', 'request line too long\n')
+      // Wait for the whole head, not just the first line: the head is rewritten
+      // below to force one request per connection (see rewriteRelayHead), and a
+      // half-forwarded head cannot be rewritten safely.
+      const headEnd = buffer.indexOf('\r\n\r\n')
+      if (headEnd === -1) {
+        if (buffer.length > 65536) tinyResponse(socket, 431, 'Too Large', 'head too large\n')
         return
       }
-      const line = buffer.subarray(0, idx).toString('latin1')
-
-      // Fast path: gate present in the query.
-      const q1 = line.indexOf('?')
-      const q2 = q1 === -1 ? -1 : line.indexOf(' ', q1)
-      const query = q1 === -1 ? '' : line.slice(q1 + 1, q2 === -1 ? undefined : q2)
-      if (query === '' || !/(^|&)g=/.test(query)) {
-        // No gate: the gate/id may arrive as cookies. Wait for the whole
-        // head inside THIS single accumulating buffer (no second buffer —
-        // double-buffering across chunks corrupts the stream).
-        const headEnd = buffer.indexOf('\r\n\r\n')
-        if (headEnd === -1) {
-          if (buffer.length > 65536) tinyResponse(socket, 431, 'Too Large', 'head too large\n')
-          return
-        }
-        const head = buffer.subarray(0, headEnd).toString('latin1')
-        const cookieMatch = head.match(/(?:^|\r\n)cookie:\s*([^\r\n]*)/i)
-        const gateCookie = cookieMatch
-          ? /(?:^|;\s*)__relay_g=([a-f0-9]{16,128})(?:;|$)/.exec(cookieMatch[1])?.[1] ?? ''
-          : ''
-        const fullHead = buffer.subarray(0, headEnd + 4)
-        remainderBytes = buffer.subarray(headEnd + 4)
-        socket.removeListener('data', first)
-        onFirstLine(line, gateCookie, fullHead)
-        return
-      }
-
-      remainderBytes = buffer.subarray(idx + 2)
+      const rawHead = buffer.subarray(0, headEnd).toString('latin1')
+      const line = rawHead.split('\r\n')[0]
+      const cookieMatch = rawHead.match(/(?:^|\r\n)cookie:\s*([^\r\n]*)/i)
+      const gateCookie = cookieMatch
+        ? /(?:^|;\s*)__relay_g=([a-f0-9]{16,128})(?:;|$)/.exec(cookieMatch[1])?.[1] ?? ''
+        : ''
+      const head = Buffer.from(`${rewriteRelayHead(rawHead)}\r\n\r\n`, 'latin1')
+      remainderBytes = buffer.subarray(headEnd + 4)
       socket.removeListener('data', first)
-      onFirstLine(line, '')
+      onFirstLine(line, gateCookie, head)
     })
     socket.on('error', () => { try { socket.destroy() } catch {} })
+}
+
+/**
+ * Force one request per phone connection.
+ *
+ * A stream is bound to a tenant by its first request line, and everything after
+ * that is a raw byte pipe. If a reverse proxy pools its upstream connections (or
+ * a browser reuses one across paths on the shared origin), the *next* request on
+ * that socket would reach the previous tenant's agent - which is how one tenant
+ * could serve another tenant's page. Asking for `Connection: close` makes the
+ * plugin end the stream after one response, so there is nothing left to reuse.
+ *
+ * An upgrade is exempt: it owns its connection until the socket closes.
+ */
+function rewriteRelayHead(head) {
+  const lines = head.split('\r\n')
+  const isUpgrade = lines.some((line) => /^upgrade:/i.test(line))
+    && lines.some((line) => /^connection:\s*[^\r\n]*upgrade/i.test(line))
+  if (isUpgrade) return head
+  const kept = lines.filter((line, index) => {
+    if (index === 0) return true
+    // The peer's keep-alive intent is overridden; hop-by-hop leftovers go too.
+    return !/^connection:/i.test(line)
+      && !/^proxy-connection:/i.test(line)
+      && !/^keep-alive:/i.test(line)
+  })
+  kept.push('Connection: close')
+  return kept.join('\r\n')
 }
 
 function tinyResponse(socket, status, reason, body) {
@@ -707,6 +730,9 @@ function startAgentListener(args, tls) {
   // Two bounds a TLS listener needs: connections whose handshake never
   // completes, and the total socket count.
   if (args.maxConnections > 0) server.maxConnections = args.maxConnections
+  // Node waits 120 s for a TLS handshake by default, and an unfinished one holds
+  // a slot for that long. Ten seconds is plenty on any real link.
+  server.handshakeTimeout = 10_000
   server.headersTimeout = Math.max(args.preAuthTimeoutMs, 5000)
   server.requestTimeout = args.preAuthTimeoutMs * 2
   // A single agent frame is a phone chunk or a control message; 8 MB is far
@@ -723,7 +749,10 @@ function startAgentListener(args, tls) {
     log('unhandled rejection (kept alive):', reason?.stack ?? reason)
   })
 
-  const wss = new WebSocketServer({ noServer: true, maxPayload: 8 * 1024 * 1024 })
+  // An agent frame is a phone chunk or a control message, and the plugin splits
+  // its sends well below this. The cap applies to unauthenticated peers too, so
+  // it is also what limits how much a stranger can make us buffer per socket.
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 })
 
   server.on('upgrade', (req, socket, head) => {
     // `req.url` is attacker-controlled and `new URL()` throws on garbage
@@ -740,7 +769,26 @@ function startAgentListener(args, tls) {
       socket.destroy()
       return
     }
-    wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req))
+    // A stranger can open sockets without ever registering. Bound how many one
+    // address can hold, so a single host cannot fill the whole listener.
+    const ip = socket.remoteAddress ?? 'unknown'
+    const open = (agentSocketsByIp.get(ip) ?? 0) + 1
+    if (open > MAX_AGENT_SOCKETS_PER_IP) {
+      log(`agent: too many open sockets from ${ip} (${open})`)
+      try { socket.write('HTTP/1.1 429 Too Many Requests\r\n\r\n') } catch {}
+      socket.destroy()
+      return
+    }
+    agentSocketsByIp.set(ip, open)
+    const release = () => {
+      const left = (agentSocketsByIp.get(ip) ?? 1) - 1
+      if (left <= 0) agentSocketsByIp.delete(ip)
+      else agentSocketsByIp.set(ip, left)
+    }
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      ws.once('close', release)
+      wss.emit('connection', ws, req)
+    })
   })
 
   wss.on('connection', (ws) => {
@@ -760,7 +808,7 @@ function startAgentListener(args, tls) {
       log('agent dropped: no registration before the deadline')
       try { ws.send(JSON.stringify({ t: 'rejected', reason: 'registration timeout' })) } catch {}
       setTimeout(() => ws.terminate(), 250)
-    }, Number(process.env.DSH_RELAY_REGISTRATION_MS ?? 15_000))
+    }, Number(process.env.DSH_RELAY_REGISTRATION_MS ?? 8_000))
     registrationDeadline.unref?.()
 
     const failConn = (reason) => {
@@ -860,6 +908,20 @@ function startAgentListener(args, tls) {
           // The registry is tenant-scoped, so two tenants may use the same
           // device id without evicting each other; only the same tenant
           // reconnecting with the same id replaces its own previous entry.
+          //
+          // The same *pair* must not be claimable twice, though: once a gate
+          // leaks, any tenant could otherwise register the victim's id+gate and
+          // win the routing every time (the victim's reconnect moves it to the
+          // back of the candidates order).
+          if (helloGate) {
+            for (const otherKey of deviceIndex.get(id) ?? []) {
+              const other = agents.get(otherKey)
+              if (!other || other.tenant?.id === tenant?.id) continue
+              if (other.gate && timingSafeEqual(other.gate, helloGate)) {
+                return failConn('device id and gate already registered by another tenant')
+              }
+            }
+          }
           const key = agentKey(tenant, id)
           const previous = agents.get(key)
           if (previous) {
@@ -1117,6 +1179,16 @@ tenantStore = new TenantStore(path.join(args.dataDir, 'tenants.json'), {
   quotaDefault: args.quotaDefault,
   maxStreamsDefault: args.maxStreamsDefault,
 })
+// Rotating a tenant key must invalidate the agent that registered with the old
+// one, otherwise the rotation only changes the file.
+tenantStore.onRotate = (tenant) => {
+  const current = tenantAgent.get(tenant.id)
+  if (!current) return
+  log(`tenant ${tenant.id}: key rotated, dropping agent ${current.id}`)
+  closeEntry(current.entry, 'key rotated')
+  if (agents.get(current.entry.key) === current.entry) forgetEntry(current.entry)
+  tenantAgent.delete(tenant.id)
+}
 const tls = ensureSelfSignedCert(args)
 const phoneServer = startPhoneListener(args)
 const agentServer = startAgentListener(args, tls)
