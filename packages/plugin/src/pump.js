@@ -992,6 +992,10 @@ export class PumpManager {
       upstream.setNoDelay(true)
       upstream.on('connect', () => {
         upstream.write(out)
+        // Frames are NOT flushed here: the host has not answered 101 yet, and a
+        // byte written before the switch looks like a pipelined HTTP request to
+        // it. Whether the browser's first frame beat the 101 was a race, which is
+        // why the mux sometimes sat silent and the page then retried.
         this.pumpPhoneWs(sid, stream)
       })
       upstream.on('data', (data) => {
@@ -1005,6 +1009,8 @@ export class PumpManager {
           this.client?.sendStream(sid, stream.wsServerBuf.subarray(0, idx + 4))
           stream.wsServerBuf = stream.wsServerBuf.subarray(idx + 4)
           stream.wsHandshakeDone = true
+          // The switch is real now: release whatever the phone already sent.
+          this.pumpPhoneWs(sid, stream)
         }
         this.pumpServerWs(sid, stream)
       })
@@ -1084,6 +1090,8 @@ export class PumpManager {
   // -- websocket sealing ---------------------------------------------------------------
   pumpPhoneWs(sid, stream) {
     if (!stream.upstream || stream.upstream.destroyed) return
+    // Not before the host answered 101: see the comment at the upgrade handler.
+    if (!stream.wsHandshakeDone) return
     for (;;) {
       const parsed = parseFrame(stream.wsPhoneBuf)
       if (!parsed) return
