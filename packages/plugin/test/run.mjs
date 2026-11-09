@@ -18,6 +18,7 @@ const SUITE = [
   'replay.test.mjs',
   'pump-http.test.mjs',
   'ws-ordering.test.mjs',
+  'ws-binary.test.mjs',
   'local-request.test.mjs',
   'nonce-persistence.test.mjs',
   'mobile-patch.test.mjs',

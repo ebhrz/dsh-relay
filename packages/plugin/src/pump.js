@@ -1100,10 +1100,12 @@ export class PumpManager {
       let out
       if (isDataFrame(frame.opcode)) {
         let plain = null
+        let binary = false
         try {
           const json = JSON.parse(frame.payload.toString('utf8'))
           if (json && typeof json.__relay === 'string') {
             plain = this.cryptoBox.open(this.cryptoBox.envelopeKey, Buffer.from(json.__relay, 'base64'))
+            binary = json.__bin === 1
           }
         } catch {}
         if (!plain) {
@@ -1117,10 +1119,10 @@ export class PumpManager {
           }
           plain = frame.payload
         }
-        // DSH 0.2's API gateway closes a binary frame with 1003 ("text
-        // messages required"). The boot patch always sends JSON text, so
-        // re-frame the decrypted payload as text upstream.
-        out = buildFrame(OPCODES.OP_TEXT, plain, { mask: true })
+        // Text stays text (the JSON protocol requires it) and binary stays binary:
+        // an ArrayBuffer payload forwarded as text is rejected by the host, and a
+        // text payload forwarded as binary is invisible to it.
+        out = buildFrame(binary ? OPCODES.OP_BINARY : OPCODES.OP_TEXT, plain, { mask: true })
       } else {
         out = buildFrame(frame.opcode, frame.payload, { mask: true, fin: frame.fin })
       }
@@ -1149,7 +1151,13 @@ export class PumpManager {
           : frame.payload
         stream.wsFragment = null
         const sealed = this.cryptoBox.seal(this.cryptoBox.envelopeKey, payload)
-        const json = Buffer.from(JSON.stringify({ __relay: sealed.toString('base64') }))
+        // Carry the message kind across the seal. The client sets
+        // binaryType="arraybuffer" and the account avatar arrives as binary;
+        // decoding it as text corrupts the bytes and the app then breaks the
+        // connection.
+        const wrapped = { __relay: sealed.toString('base64') }
+        if (frame.opcode === OPCODES.OP_BINARY) wrapped.__bin = 1
+        const json = Buffer.from(JSON.stringify(wrapped))
         this.client?.sendStream(sid, buildFrame(OPCODES.OP_TEXT, json, { mask: false }))
         continue
       }

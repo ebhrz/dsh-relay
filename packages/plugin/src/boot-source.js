@@ -472,32 +472,44 @@ export function buildBootSource(id, gate) {
         try { userHandlers[i](ev) } catch (e) { console.error(e) }
       }
     }
-    function deliverSealed(b64) {
+    // Binary is a real message kind here: the client sets binaryType="arraybuffer"
+    // and the account avatar arrives that way. Decoding those bytes as text both
+    // corrupts them and makes the host reject the frame, which is what killed the
+    // mux when the account panel opened.
+    function deliverSealed(b64, isBinary) {
       var bin = atob(b64)
       var bytes = new Uint8Array(bin.length)
       for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
       var plain = openEnvelope(bytes)
       if (!plain) return
+      if (isBinary) {
+        var copy = new Uint8Array(plain.length)
+        copy.set(plain)
+        return deliverRaw(copy.buffer)
+      }
       deliverRaw(new TextDecoder().decode(plain))
     }
     target.addEventListener('message', function (ev) {
       if (typeof ev.data !== 'string') return deliverRaw(ev.data)
       try {
         var parsed = JSON.parse(ev.data)
-        if (parsed && typeof parsed.__relay === 'string') return deliverSealed(parsed.__relay)
+        if (parsed && typeof parsed.__relay === 'string') {
+          return deliverSealed(parsed.__relay, parsed.__bin === 1)
+        }
       } catch (e) {}
       deliverRaw(ev.data)
     })
 
     var origSend = target.send.bind(target)
     target.send = function (data) {
-      var bytes = typeof data === 'string'
-        ? new TextEncoder().encode(data)
-        : new Uint8Array(data)
+      var isBinary = typeof data !== 'string'
+      var bytes = isBinary ? new Uint8Array(data) : new TextEncoder().encode(data)
       var sealed = sealEnvelope(bytes)
       var bin = ''
       for (var i = 0; i < sealed.length; i++) bin += String.fromCharCode(sealed[i])
-      origSend(JSON.stringify({ __relay: btoa(bin) }))
+      var wrapped = { __relay: btoa(bin) }
+      if (isBinary) wrapped.__bin = 1
+      origSend(JSON.stringify(wrapped))
     }
     Object.defineProperty(target, 'onmessage', {
       get: function () { return userListener },
