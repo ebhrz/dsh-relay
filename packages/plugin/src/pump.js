@@ -344,11 +344,18 @@ export class PumpManager {
     stream.info = info
     // The path in the request line is raw, and the upstream may normalize it:
     // `/assets/../api/private` matches the asset allowlist as a string but lands
-    // on a private API once DSH resolves the dots. Refuse anything whose
-    // canonical form differs from what was sent, so the string we allow is the
-    // string DSH routes.
+    // on a private API once DSH resolves the dots. The check is on the *decoded*
+    // path, because DSH decodes percent-escapes before routing: a name like
+    // `running-whale%402x.png` is a legitimate file, while `%2e%2e` is a dot
+    // segment wearing a disguise. Comparing the canonical form with the decoded
+    // string accepts the first and refuses the second.
     const canonical = canonicalPath(info.path)
-    if (canonical === null || canonical !== info.path) {
+    const decoded = decodePathOnce(info.path)
+    // An encoded separator is refused even though it stays under the same prefix:
+    // the relay checks a string and DSH routes a path, and `%2F` makes those two
+    // disagree about where the segments are.
+    const encodesSeparator = /%(2f|5c)/i.test(info.path)
+    if (canonical === null || decoded === null || encodesSeparator || canonical !== decoded) {
       auditLog(`relayed request with a non-canonical path refused (${info.path.slice(0, 120)})`)
       this.respondInline(sid, 400, 'Bad Request')
       this.closeStream(sid)
@@ -1386,6 +1393,20 @@ export function canonicalPath(rawPath) {
     parts.push(segment)
   }
   return `/${parts.join('/')}${trailingSlash ? '/' : ''}`
+}
+
+/**
+ * One round of percent-decoding, or null when the escapes are malformed.
+ *
+ * Exactly one round: DSH decodes once, so a string that still contains `%` after
+ * this is a second (encoded) round and is refused by `canonicalPath`.
+ */
+export function decodePathOnce(rawPath) {
+  try {
+    return decodeURIComponent(rawPath)
+  } catch {
+    return null
+  }
 }
 
 export function stripGateParam(query) {

@@ -314,8 +314,38 @@ await scenario('a sealed request is bound to its method and path', async () => {
 })
 
 
-// The audit's path claim: the allowlist matched raw strings, so an asset path with
-// dot segments could be normalized upstream into a private API.
+// Percent-encoding must be accepted when it is only a file name, and refused when
+// decoding would change the path's structure. The old check compared the canonical
+// form with the *raw* string, so every encoded name was a 400: DSH's own chat
+// assets (`running-whale%402x.png`) failed to load through the relay.
+await scenario('an encoded asset name loads, an encoded traversal does not', async () => {
+  const h = await harness((_req, res) => {
+    res.writeHead(200, { 'content-type': 'image/png', 'content-length': '4' })
+    res.end('PNG!')
+  })
+  try {
+    // %40 is '@': a legitimate character in a file name.
+    h.pump.handleStreamData(31, request('GET', h.url('/plugins/x/assets/running-whale%402x-06738f.png'), ['Sec-Fetch-Dest: image']))
+    await waitFor(() => h.hits.length === 1, 'the encoded asset forwards')
+    assert.equal(h.hits[0].url, '/plugins/x/assets/running-whale%402x-06738f.png', 'the raw path is forwarded unchanged')
+
+    h.reset()
+    const hitsBefore = h.hits.length
+    for (const [sid, path] of [
+      [32, '/assets/%2e%2e/api/private'],
+      [33, '/assets/%252e%252e/api/private'],
+      [34, '/assets/a%2Fb.js'],
+      [35, '/assets/%2e/api/private'],
+    ]) {
+      h.pump.handleStreamData(sid, request('GET', h.url(path), ['Sec-Fetch-Dest: document']))
+      await waitFor(() => h.closed.includes(sid), `${path} refused`)
+    }
+    assert.equal(h.hits.length, hitsBefore, 'no encoded traversal reached the host')
+  } finally {
+    h.stop()
+  }
+})
+
 await scenario('a traversal path cannot reach an API', async () => {
   const h = await harness((_req, res) => {
     res.writeHead(200, { 'content-type': 'text/plain', 'content-length': '8' })

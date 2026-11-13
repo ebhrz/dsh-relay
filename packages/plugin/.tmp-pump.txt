@@ -1,0 +1,11 @@
+ok a forged Upgrade on an API path never reaches the host
+ok a sealed GET carries no body and seals its response
+ok a state-changing request still needs an envelope
+ok random bytes that are not an envelope are refused
+ok the boot script is only injected into html
+ok a sealed request is bound to its method and path
+ok an encoded asset name loads, an encoded traversal does not
+ok a traversal path cannot reach an API
+ok a sealed read needs a proof the relay cannot mint
+ok a sealed target carrying the relay prefix is accepted
+all pump http checks passed
