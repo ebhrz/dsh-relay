@@ -4,6 +4,7 @@ node_modules/
 # Local build/test output
 .tmp/
 *.log
+*.tgz
 
 # Editor / OS noise
 .DS_Store
