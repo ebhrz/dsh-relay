@@ -19,3 +19,4 @@ certs/
 *.key
 *identity.json
 packages/relay/.tmp-*
+packages/plugin/.tmp-*
