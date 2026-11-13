@@ -1,8 +1,9 @@
 name: tests
 
-# Documentation-only pushes do not need a test run: while this repository is
-# private every run is billed against the account's Action minutes, and a README
-# edit proves nothing about the code. A commit that touches both still runs.
+# Two decisions worth keeping: a documentation-only push proves nothing about the
+# code, so it does not run the suite; and a superseded run is cancelled instead of
+# paying for both (minutes are free on a public repo, but a stale red/green check
+# is still noise). A commit that touches both docs and code does run.
 on:
   push:
     branches: [main]
@@ -14,7 +15,6 @@ on:
   pull_request:
   workflow_dispatch:
 
-# Superseded runs are pure cost: cancel the older one instead of paying for both.
 concurrency:
   group: tests-${{ github.ref }}
   cancel-in-progress: true
