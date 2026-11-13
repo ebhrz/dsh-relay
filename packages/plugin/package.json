@@ -2,6 +2,7 @@
   "name": "dsh-relay-phone",
   "version": "0.18.5",
   "description": "Remote-control your local DeepSeek Harness from a phone through your own zero-knowledge relay: phone-first page, QR pairing, end-to-end encryption, approvals, full desktop UI fallback.",
+  "author": "ebhrz <relay@dshrelay.com>",
   "type": "module",
   "main": "src/index.js",
   "exports": {

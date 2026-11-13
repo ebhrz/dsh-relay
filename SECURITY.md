@@ -2,7 +2,11 @@
 
 ## Reporting a vulnerability
 
-Email **ebhrz1@gmail.com** with the details, or open a private security advisory on GitHub. Please do not file a public issue.
+Open a **private security advisory** on GitHub — it keeps the report, the fix and the
+credit in one place, and no mail server has to be trusted with the details.
+
+If you cannot use GitHub, email **security@dshrelay.com**. Please do not file a public
+issue.
 
 Include what you did, what you observed, and what an attacker gains. A proof of concept helps; so does the version (`packages/plugin/package.json`) and how the relay is exposed (TLS terminator, reverse proxy, plain HTTP, private network).
 
